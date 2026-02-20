@@ -99,7 +99,4 @@ jobs:
             fi
 
             echo "Successfully deployed to $INSTANCE_ID"
-
-            echo "Waiting for ALB health check..."
-            sleep 30
           done
