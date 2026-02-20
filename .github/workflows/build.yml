@@ -59,7 +59,7 @@ jobs:
         id: instances
         run: |
           INSTANCE_IDS=$(aws ec2 describe-instances \
-            --filters "Name=tag:Obscura Instance" "Name=instance-state-name,Values=running" \
+            --filters "Name=tag:App,Values=Obscura" "Name=instance-state-name,Values=running" \
             --query "Reservations[].Instances[].InstanceId" \
             --output text)
           echo "ids=$INSTANCE_IDS" >> $GITHUB_OUTPUT
