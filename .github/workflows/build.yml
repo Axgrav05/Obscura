@@ -73,10 +73,12 @@ jobs:
           for INSTANCE_ID in ${{ steps.instances.outputs.ids }}; do
             echo "Deploying to $INSTANCE_ID..."
 
+            DEPLOY_SCRIPT=$(cat scripts/deploy.sh | base64 -w 0)
+
             COMMAND_ID=$(aws ssm send-command \
               --instance-ids "$INSTANCE_ID" \
               --document-name "AWS-RunShellScript" \
-              --parameters "commands=[\"$DEPLOY_SCRIPT ${{ secrets.AWS_REGION }} ${{ secrets.AWS_ACCOUNT_ID }} obscura $IMAGE_TAG\"]" \
+              --parameters "commands=[\"echo $DEPLOY_SCRIPT | base64 -d | bash -s -- ${{ secrets.AWS_REGION }} ${{ secrets.AWS_ACCOUNT_ID }} your-app-name $IMAGE_TAG\"]" \
               --query "Command.CommandId" \
               --output text)
 
