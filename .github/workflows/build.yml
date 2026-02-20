@@ -78,7 +78,7 @@ jobs:
             COMMAND_ID=$(aws ssm send-command \
               --instance-ids "$INSTANCE_ID" \
               --document-name "AWS-RunShellScript" \
-              --parameters "commands=[\"echo $DEPLOY_SCRIPT | base64 -d | bash -s -- ${{ secrets.AWS_REGION }} ${{ secrets.AWS_ACCOUNT_ID }} your-app-name $IMAGE_TAG\"]" \
+              --parameters "commands=[\"echo $DEPLOY_SCRIPT | base64 -d | bash -s -- ${{ secrets.AWS_REGION }} ${{ secrets.AWS_ACCOUNT_ID }} obscura/obscura_server $IMAGE_TAG\"]" \
               --query "Command.CommandId" \
               --output text)
 
