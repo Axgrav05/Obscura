@@ -2,7 +2,7 @@
 
 > **Author:** Arjun (AI/ML Lead) | **Date:** 2026-02-16
 > **Jira Epics:** OBS-3 (Benchmarking), OBS-7 (Integration), OBS-12 (Hardening)
-> **Hardware Target:** OCI Always Free ARM Ampere A1 (4 OCPUs, 24GB shared RAM)
+> **Hardware Target:** AWS EC2 t3.medium (2 vCPUs, 4GB RAM, x86_64)
 > **Latency Budget:** ≤30ms inference (within 60ms total proxy overhead)
 > **Accuracy Target:** 90%+ macro F1 across enterprise + medical entity types
 
@@ -74,9 +74,9 @@ Track all of the following for every model candidate:
 | **Macro F1** | ≥90% | The headline number. Weighted by entity type frequency in real traffic (estimated). |
 | **Precision** | ≥92% | For a redaction system, false positives (over-masking) are more tolerable than false negatives (PII leakage). But excessive false positives degrade LLM output quality. |
 | **Recall** | ≥88% | Non-negotiable floor. Missed PII is a compliance violation. |
-| **Latency p50/p95/p99 (ms)** | p95 ≤30ms | Measured on ARM or simulated with throttled CPU. p99 matters for tail latency SLOs. |
-| **Model size (MB)** | ≤300MB ONNX | Must fit in OCI ARM instance memory alongside the Rust proxy and OS. |
-| **Peak RAM (MB)** | ≤1.5GB inference | Ampere A1 free tier is 24GB shared across all pods. Budget ~2GB for the inference container. |
+| **Latency p50/p95/p99 (ms)** | p95 ≤30ms | Measured on EC2 t3.medium or equivalent x86_64 CPU. p99 matters for tail latency SLOs. |
+| **Model size (MB)** | ≤300MB ONNX | Must fit in EC2 instance memory alongside the Rust proxy and OS. Docker image <100MB (distroless multi-stage). |
+| **Peak RAM (MB)** | ≤1.5GB inference | t3.medium provides 4GB total RAM. Budget ~2GB for the inference container. |
 
 ### 1.5 Evaluation Script Outline
 
@@ -170,12 +170,13 @@ Step 1: Export PyTorch → ONNX
 Step 2: Quantize
   - Strategy: Dynamic INT8 quantization
   - Why dynamic over static: no calibration dataset needed, simpler pipeline,
-    and ARM CPUs benefit from INT8 via NEON SIMD but don't have native FP16
-    compute units (unlike GPUs). Static quantization would give ~5% better
-    latency but requires a representative calibration set and more tooling.
-  - Why INT8 over FP16: ARM Ampere A1 doesn't have FP16 ALUs for server
-    workloads. INT8 is the sweet spot — ~2x smaller model, ~1.5x faster
-    inference via NEON vectorization.
+    and x86_64 CPUs benefit from INT8 via AVX2/VNNI instructions. Static
+    quantization would give ~5% better latency but requires a representative
+    calibration set and more tooling.
+  - Why INT8 over FP16: EC2 t3.medium CPUs (Intel Xeon) have strong INT8
+    support via VNNI but limited native FP16 compute. INT8 is the sweet
+    spot — ~2x smaller model, ~1.5x faster inference via vectorized
+    instructions.
   - Tool: onnxruntime.quantization.quantize_dynamic
 
 Step 3: Validate
@@ -209,8 +210,8 @@ How to measure:
   - Warm up with 10 throwaway inferences (first call loads model into cache)
   - Run 1,000 inferences on representative inputs (varying length: 50-500 tokens)
   - Report: p50, p95, p99, max
-  - For ARM simulation on dev machines: use CPU frequency throttling (if on macOS)
-    or benchmark directly on an OCI A1 instance via SSH
+  - Benchmark directly on an EC2 t3.medium instance via SSH, or on any
+    equivalent x86_64 machine
 
 What NOT to do:
   - Don't measure with PyTorch — measure ONNX Runtime only (that's what runs in prod)
@@ -329,7 +330,7 @@ Method: Shadow Model Attack (Shokri et al., 2017)
 Run with noise OFF and noise ON to quantify the privacy improvement.
 ```
 
-**Practical concern:** Shadow model training is expensive (N=10 minimum, each is a full BERT fine-tune). Budget ~8-12 GPU-hours. Consider running this on a cloud GPU instance (not on ARM) as a one-time validation step.
+**Practical concern:** Shadow model training is expensive (N=10 minimum, each is a full BERT fine-tune). Budget ~8-12 GPU-hours. Consider running this on a cloud GPU instance (not on t3.medium) as a one-time validation step.
 
 ---
 
@@ -409,7 +410,7 @@ Jobs:
     - Fail if any raw PII appears outside of test input fixtures
 ```
 
-**Note:** The benchmark job needs a cached model download (HuggingFace or OCI Object Storage) to avoid re-downloading 400MB on every CI run. Use GitHub Actions cache or a self-hosted runner with persistent storage.
+**Note:** The benchmark job needs a cached model download (HuggingFace or S3) to avoid re-downloading 400MB on every CI run. Use GitHub Actions cache or a self-hosted runner with persistent storage.
 
 ### 5.4 Go/No-Go Criteria
 
@@ -463,7 +464,7 @@ Before merging any model change into the develop branch:
 [ ] OBS-7.7  Define and document mapping dictionary JSON spec
 [ ] OBS-7.8  Package artifact bundle (model, tokenizer, schema, checksums, metadata)
 [ ] OBS-7.9  Write latency profiler script (1,000 inferences, varying lengths)
-[ ] OBS-7.10 Profile on OCI ARM instance (SSH benchmark) — confirm ≤30ms p95
+[ ] OBS-7.10 Profile on AWS EC2 t3.medium instance (SSH benchmark) — confirm ≤30ms p95
 [ ] OBS-7.11 Handoff artifact bundle to Rainier + walk through schema.json
 [ ] OBS-7.12 Integration smoke test: Rust ort loads model, runs one inference, outputs match
 ```
@@ -489,25 +490,25 @@ Before merging any model change into the develop branch:
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|------|-----------|--------|-----------|
-| 1 | **INT8 quantization degrades clinical NER accuracy beyond tolerance** | Medium | High — could blow F1 below 90% | Fallback to FP16. If FP16 is too large for ARM RAM, try mixed quantization (INT8 body, FP16 classification head). |
-| 2 | **30ms latency not achievable on ARM A1** | Medium | High — fundamentally blocks the architecture | DistilBERT reduces latency ~40%. If still over budget, investigate ONNX Runtime graph optimizations (operator fusion, constant folding) or reduce max_sequence_length from 512 to 256. |
+| 1 | **INT8 quantization degrades clinical NER accuracy beyond tolerance** | Medium | High — could blow F1 below 90% | Fallback to FP16. If FP16 is too large for EC2 RAM (4GB total), try mixed quantization (INT8 body, FP16 classification head). |
+| 2 | **30ms latency not achievable on EC2 t3.medium** | Low-Medium | High — fundamentally blocks the architecture | Lower risk on x86_64 vs ARM due to better ONNX Runtime optimization. DistilBERT reduces latency ~40%. If still over budget, investigate ONNX Runtime graph optimizations (operator fusion, constant folding) or reduce max_sequence_length from 512 to 256. |
 | 3 | **Synthetic test data doesn't represent real-world distribution** | High | Medium — benchmarks look good but production accuracy is lower | After deployment, add a human-in-the-loop review on a sample of redacted outputs (with PII already masked). Use findings to improve synthetic data generation. |
 | 4 | **Differential privacy degrades medical entity detection disproportionately** | Medium | Medium — clinical entities may be more noise-sensitive | Per-entity DP analysis (Phase 4.2). If medical F1 drops below 85%, consider applying noise only to non-medical entity types (trade weaker privacy on names for stronger on MRNs). |
 | 5 | **Shadow model MIA testing is too expensive** | Low | Low — delays OBS-12 but doesn't block deployment | Reduce to N=5 shadow models (less statistical power but still directionally correct). Or use simpler MIA methods (threshold attack on confidence scores). |
-| 6 | **ONNX Runtime on ARM has limited operator support** | Low | High — model won't load at all | Test ONNX export early (Phase 3, not after Phase 2). Use `onnxruntime` profiling to identify unsupported ops. The `ort` Rust crate tracks the same backend. |
+| 6 | **ONNX Runtime operator compatibility issues on x86_64** | Low | High — model won't load at all | Lower risk than ARM — x86_64 has the best ONNX Runtime support. Still test ONNX export early (Phase 3, not after Phase 2). The `ort` Rust crate tracks the same backend. |
 | 7 | **Integration contract changes cause Rust-side rework** | Medium | Medium — delays OBS-7 | Freeze schema.json as early as possible (end of Phase 1). Communicate all changes via PR reviews that tag Rainier. |
 
 ---
 
 ## Questions Before Implementation
 
-1. **Model selection scope:** Should we evaluate any other model candidates beyond the four listed? I excluded multilingual models (XLM-R) and large models (bert-large) — the former because Obscura's scope appears English-only, the latter because it won't fit the ARM latency budget. Confirm?
+1. **Model selection scope:** Should we evaluate any other model candidates beyond the four listed? I excluded multilingual models (XLM-R) and large models (bert-large) — the former because Obscura's scope appears English-only, the latter because it won't fit the EC2 t3.medium latency/RAM budget. Confirm?
 
 2. **DistilBERT as production default:** If DistilBERT-NER benchmarks within 2-3 F1 points of bert-base-NER and meets latency, are you comfortable making it the production model? This is the single biggest lever for hitting 30ms.
 
 3. **Privacy budget ownership:** Who decides the epsilon value — the ML team, the security team, or the customer? This determines whether we hardcode it, make it configurable per-deployment, or expose it as an API parameter.
 
-4. **OCI ARM access for benchmarking:** Do we have an ARM instance provisioned where I can SSH in and run latency benchmarks? Simulating on macOS (Apple Silicon) won't give accurate numbers for Ampere A1.
+4. **EC2 access for benchmarking:** Do we have a t3.medium instance provisioned where I can SSH in and run latency benchmarks? Simulating on macOS (Apple Silicon) won't give accurate numbers for Intel Xeon x86_64.
 
 5. **Rainier sync cadence:** How often should I sync with Rainier on the integration contract? I'd suggest a brief check-in after Phase 1 (model selected, schema draft) and a formal handoff at end of Phase 3 (artifact bundle ready).
 

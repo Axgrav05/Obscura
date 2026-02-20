@@ -6,7 +6,7 @@ reversible masking. Detected entities are replaced with indexed tokens
 (e.g., [PERSON_1], [LOCATION_2]) and tracked in a mapping dictionary
 for downstream restoration by the Rust backend.
 
-Designed for ONNX export and sub-30ms inference on ARM targets.
+Designed for ONNX export and sub-30ms inference on AWS EC2 (x86_64).
 
 HIPAA/GDPR: No raw PII is logged or persisted by this module.
 """

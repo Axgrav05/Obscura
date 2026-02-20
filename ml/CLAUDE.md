@@ -20,7 +20,7 @@ source .venv/bin/activate
 
 ## Constraints
 - Target accuracy: 90%+ F1
-- Exported ONNX must be quantized to fit OCI ARM instance RAM
+- Exported ONNX must be quantized to fit AWS EC2 t3.medium instance RAM (4GB total)
 - Inference latency budget: ≤30ms
 
 ## Testing

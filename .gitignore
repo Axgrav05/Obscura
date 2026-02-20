@@ -17,3 +17,6 @@ __pycache__/
 *.bin
 *.pt
 *.safetensors
+
+# Benchmark results (local, timestamped)
+ml/results/
