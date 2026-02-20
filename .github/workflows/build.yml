@@ -1,4 +1,4 @@
-name: Build and Push to ECR
+name: Build, Push, and Deploy
 
 on:
   push:
@@ -11,6 +11,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
 
     steps:
       - name: Checkout
@@ -27,6 +29,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push image
+        id: meta
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           REPOSITORY: obscura/obscura_server
@@ -36,3 +39,65 @@ jobs:
           docker tag $REGISTRY/$REPOSITORY:$IMAGE_TAG $REGISTRY/$REPOSITORY:latest
           docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
           docker push $REGISTRY/$REPOSITORY:latest
+          echo "tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get instance IDs
+        id: instances
+        run: |
+          INSTANCE_IDS=$(aws ec2 describe-instances \
+            --filters "Name=tag:Obscura Instance" "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].InstanceId" \
+            --output text)
+          echo "ids=$INSTANCE_IDS" >> $GITHUB_OUTPUT
+
+      - name: Deploy to instances sequentially
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+        run: |
+          DEPLOY_SCRIPT=$(cat scripts/deploy.sh)
+
+          for INSTANCE_ID in ${{ steps.instances.outputs.ids }}; do
+            echo "Deploying to $INSTANCE_ID..."
+
+            COMMAND_ID=$(aws ssm send-command \
+              --instance-ids "$INSTANCE_ID" \
+              --document-name "AWS-RunShellScript" \
+              --parameters "commands=[\"$DEPLOY_SCRIPT ${{ secrets.AWS_REGION }} ${{ secrets.AWS_ACCOUNT_ID }} obscura $IMAGE_TAG\"]" \
+              --query "Command.CommandId" \
+              --output text)
+
+            echo "Waiting for command $COMMAND_ID to complete..."
+            aws ssm wait command-executed \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID"
+
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "Status" \
+              --output text)
+
+            if [ "$STATUS" != "Success" ]; then
+              echo "Deploy failed on $INSTANCE_ID with status $STATUS"
+              exit 1
+            fi
+
+            echo "Successfully deployed to $INSTANCE_ID"
+
+            echo "Waiting for ALB health check..."
+            sleep 30
+          done
