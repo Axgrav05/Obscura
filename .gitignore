@@ -1,1 +1,37 @@
+# ===============================
+# Rust
+# ===============================
 /target
+
+# (NOTE: Keep Cargo.lock if this becomes an application.
+# Remove this ignore if the team wants Cargo.lock committed.)
+
+# ===============================
+# macOS
+# ===============================
+.DS_Store
+
+# ===============================
+# Environment files
+# ===============================
+.env
+.env.*
+*.local
+
+# ===============================
+# Python (if ML scripts added later)
+# ===============================
+__pycache__/
+*.pyc
+.venv/
+
+# ===============================
+# IDE / Editor
+# ===============================
+.vscode/
+.idea/
+
+# ===============================
+# Logs
+# ===============================
+*.log
