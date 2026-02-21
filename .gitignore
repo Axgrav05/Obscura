@@ -2,7 +2,6 @@
 # Rust
 # ===============================
 /target
-Cargo.lock
 
 # (NOTE: Keep Cargo.lock if this becomes an application.
 # Remove this ignore if the team wants Cargo.lock committed.)
