@@ -14,7 +14,7 @@
 | **Bigan** | - Task A | - Task B | [Detail] | X hrs |
 | **Kyle** | - Task A | - Task B | [Detail] | X hrs |
 | **Rainer** | - Task A | - Task B | [Detail] | X hrs |
-| **Eduardo** | - Task A | - Task B | [Detail] | X hrs |
+|**Eduardo** | Set up Grafana Cloud workspace; Configured Prometheus datasource; Created Compliance, Redaction Detail, and Performance dashboards | Implement /metrics endpoint in Rust proxy; Add Prometheus counters and latency histogram; Deploy Prometheus via Docker; Configure scrape targets; Verify metrics appear in Performance dashboard | Grafana Cloud Free plan limited to one stack, auto-named after account rather than project. | 4 hrs |
 | **Billy** | - Task A | - Task B | [Detail] | X hrs |
 
 **Total Team Time Spent:** [Sum] Hours
