@@ -325,6 +325,38 @@ def save_results(results: dict, output_dir: Path) -> Path:
     return output_path
 
 
+def print_comparison_table(all_results: list[dict]) -> None:
+    """Print a side-by-side comparison table of multiple model evaluations.
+
+    Columns: Model, Macro F1, Precision, Recall, Latency p50, Latency p95,
+    RSS Peak (MB), tracemalloc Peak (MB). This is the primary output for
+    OBS-3 benchmarking — lets us compare candidates at a glance.
+    """
+    header = (
+        f"{'Model':<42} {'F1':>6} {'Prec':>6} {'Rec':>6} "
+        f"{'p50ms':>7} {'p95ms':>7} {'RSS_MB':>7} {'tmPeak':>7}"
+    )
+    print("\n" + "=" * len(header))
+    print("  MODEL COMPARISON TABLE")
+    print("=" * len(header))
+    print(header)
+    print("-" * len(header))
+
+    for r in all_results:
+        m = r["metrics"]
+        lat = r["latency"]
+        mem = r.get("memory", {})
+        rss = mem.get("rss_peak_mb", 0)
+        tmp = mem.get("tracemalloc_peak_mb", 0)
+        print(
+            f"{r['model']:<42} {m['macro_f1']:>6.4f} {m['macro_precision']:>6.4f} "
+            f"{m['macro_recall']:>6.4f} {lat['p50_ms']:>7.1f} {lat['p95_ms']:>7.1f} "
+            f"{rss:>7.1f} {tmp:>7.1f}"
+        )
+
+    print("=" * len(header))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate NER model on synthetic Obscura dataset"
@@ -332,8 +364,12 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default="dslim/bert-base-NER",
-        help="HuggingFace model ID or local path (default: dslim/bert-base-NER)",
+        nargs="+",
+        default=["dslim/bert-base-NER"],
+        help=(
+            "HuggingFace model ID(s). Pass multiple for comparison table. "
+            "(default: dslim/bert-base-NER)"
+        ),
     )
     parser.add_argument(
         "--dataset",
@@ -358,12 +394,18 @@ def main() -> None:
         print("Run generate_synthetic_data.py first.")
         raise SystemExit(1)
 
-    results = run_evaluation(args.model, dataset_path, limit=args.limit)
-    print_results(results)
-
     results_dir = Path(__file__).parent / "results"
-    saved_path = save_results(results, results_dir)
-    print(f"\nResults saved to: {saved_path}")
+    all_results: list[dict] = []
+
+    for model_name in args.model:
+        results = run_evaluation(model_name, dataset_path, limit=args.limit)
+        print_results(results)
+        saved_path = save_results(results, results_dir)
+        print(f"\nResults saved to: {saved_path}\n")
+        all_results.append(results)
+
+    if len(all_results) > 1:
+        print_comparison_table(all_results)
 
 
 if __name__ == "__main__":
