@@ -12,6 +12,7 @@ dependencies = [
     "scispacy",
     "datasets",
     "seqeval",
+    "psutil",
     "pandas",
     "numpy",
 ]

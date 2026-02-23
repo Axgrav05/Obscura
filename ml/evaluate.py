@@ -22,11 +22,14 @@ separately once the regex layer is integrated.
 
 import argparse
 import json
+import os
 import time
+import tracemalloc
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import psutil
 from seqeval.metrics import (
     classification_report,
     f1_score,
@@ -42,6 +45,17 @@ from transformers import (
 
 # Entity types that BERT NER models can detect. Others are regex-only.
 BERT_ENTITY_TYPES: set[str] = {"PER", "ORG", "LOC", "MISC"}
+
+
+def _get_memory_mb() -> float:
+    """Return current RSS (Resident Set Size) of this process in MB.
+
+    RSS measures the actual physical RAM consumed, which is what matters
+    for the EC2 t3.medium 4GB constraint. Uses psutil for cross-platform
+    accuracy.
+    """
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / (1024 * 1024)
 
 
 def load_dataset(path: Path, limit: int | None = None) -> list[dict]:
@@ -162,6 +176,10 @@ def run_evaluation(
     Returns:
         Results dictionary with metrics and metadata.
     """
+    # Memory baseline before model load.
+    rss_before_mb = _get_memory_mb()
+    tracemalloc.start()
+
     print(f"Loading model: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForTokenClassification.from_pretrained(model_name)
@@ -172,6 +190,10 @@ def run_evaluation(
         aggregation_strategy="simple",
         device=-1,  # CPU — matches production target
     )
+
+    rss_after_load_mb = _get_memory_mb()
+    model_rss_mb = rss_after_load_mb - rss_before_mb
+    print(f"  Model RSS delta: {model_rss_mb:.1f} MB")
 
     print(f"Loading dataset: {dataset_path}")
     samples = load_dataset(dataset_path, limit=limit)
@@ -198,6 +220,12 @@ def run_evaluation(
 
         if (i + 1) % 50 == 0:
             print(f"  Processed {i + 1}/{len(samples)} samples...")
+
+    # Capture peak memory after inference loop.
+    rss_peak_mb = _get_memory_mb()
+    _, tracemalloc_peak_bytes = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    tracemalloc_peak_mb = tracemalloc_peak_bytes / (1024 * 1024)
 
     # Compute metrics via seqeval.
     macro_f1 = f1_score(all_true_tags, all_pred_tags, average="macro", zero_division=0)
@@ -230,6 +258,13 @@ def run_evaluation(
             "macro_recall": round(macro_recall, 4),
         },
         "latency": latency_stats,
+        "memory": {
+            "rss_before_model_mb": round(rss_before_mb, 1),
+            "rss_after_model_load_mb": round(rss_after_load_mb, 1),
+            "model_rss_delta_mb": round(model_rss_mb, 1),
+            "rss_peak_mb": round(rss_peak_mb, 1),
+            "tracemalloc_peak_mb": round(tracemalloc_peak_mb, 1),
+        },
         "classification_report": report_str,
         "note": (
             "BERT-only evaluation. SSN/PHONE/EMAIL/MRN/DOB ground truth "
@@ -260,6 +295,14 @@ def print_results(results: dict) -> None:
     print(f"  Latency p99:  {lat['p99_ms']:.1f} ms")
     print(f"  Latency mean: {lat['mean_ms']:.1f} ms")
     print(f"  Latency max:  {lat['max_ms']:.1f} ms")
+
+    if "memory" in results:
+        mem = results["memory"]
+        print(f"\n  RAM (RSS) before model:  {mem['rss_before_model_mb']:.1f} MB")
+        print(f"  RAM (RSS) after load:    {mem['rss_after_model_load_mb']:.1f} MB")
+        print(f"  Model RSS delta:         {mem['model_rss_delta_mb']:.1f} MB")
+        print(f"  RAM (RSS) peak:          {mem['rss_peak_mb']:.1f} MB")
+        print(f"  tracemalloc peak:        {mem['tracemalloc_peak_mb']:.1f} MB")
 
     print("\n  Per-entity breakdown:")
     print(results["classification_report"])
