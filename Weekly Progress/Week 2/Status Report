@@ -10,7 +10,7 @@
 
 | Team Member | Tasks Completed | Planned Tasks (Next Week) | Issues / Challenges | Time Spent |
 | :--- | :--- | :--- | :--- | :--- |
-| **Arjun** | - Task A<br>- Task B | - Task C | None | X hrs |
+| **Arjun** | - Implemented synthetic PII dataset generator<br>- Built NER model evaluation harness<br>- Evaluated candidate models (distilbert, bert-base, stanford)<br>- Wrote and tested PIIEngine for redaction | - Integrate engine with Rust backend | HuggingFace file locks caused background download scripts to hang, requiring offline-mode execution. | 8 hrs |
 | **Bigan** | - Task A | - Task B | [Detail] | X hrs |
 | **Kyle** | - Task A | - Task B | [Detail] | X hrs |
 | **Rainer** | - Task A | - Task B | [Detail] | X hrs |
