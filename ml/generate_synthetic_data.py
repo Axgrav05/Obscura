@@ -52,12 +52,29 @@ LABEL_LIST: list[str] = [
 LABEL_TO_ID: dict[str, int] = {label: i for i, label in enumerate(LABEL_LIST)}
 
 
-def _ssn() -> str:
-    """Generate a realistic SSN pattern (XXX-XX-XXXX)."""
-    a = random.randint(100, 999)
-    b = random.randint(10, 99)
-    c = random.randint(1000, 9999)
-    return f"{a}-{b}-{c}"
+def _ssn(dashless: bool = False) -> str:
+    """Generate a realistic SSN with IRS-valid components.
+
+    Per SSA/IRS rules (Publication 4557), invalid SSNs have:
+    - Area (first 3 digits): 000, 666, or 900-999
+    - Group (middle 2 digits): 00
+    - Serial (last 4 digits): 0000
+
+    Args:
+        dashless: If True, return 9 digits without dashes (e.g. "123456789").
+                  If False, return dashed format (e.g. "123-45-6789").
+    """
+    while True:
+        area = random.randint(1, 899)
+        if area == 666:
+            continue
+        break
+    group = random.randint(1, 99)
+    serial = random.randint(1, 9999)
+
+    if dashless:
+        return f"{area:03d}{group:02d}{serial:04d}"
+    return f"{area:03d}-{group:02d}-{serial:04d}"
 
 
 def _mrn() -> str:
@@ -143,8 +160,14 @@ def _tokenize_and_label(
 
 
 def _enterprise_sample() -> tuple[str, list[tuple[str, str]]]:
-    """Generate one enterprise-domain sample with PII entities."""
-    templates = [
+    """Generate one enterprise-domain sample with PII entities.
+
+    Includes both dashed and dashless SSN templates. Dashless templates
+    use SSN-context trigger words ("social security number", "SSN",
+    "tax ID") so the context-aware regex detector can identify them.
+    """
+    # Templates with dashed SSNs (original).
+    dashed_templates = [
         lambda p, o, s, ph, e, loc: (
             f"Please summarize the case for {p} (SSN: {s}), "
             f"who works at {o} and can be reached at {ph} or {e}.",
@@ -171,15 +194,38 @@ def _enterprise_sample() -> tuple[str, list[tuple[str, str]]]:
         ),
     ]
 
+    # Templates with dashless SSNs — include trigger words for context.
+    dashless_templates = [
+        lambda p, o, sd, ph, e, loc: (
+            f"Employee {p} at {o} has social security number {sd} on file.",
+            [(p, "PER"), (o, "ORG"), (sd, "SSN")],
+        ),
+        lambda p, o, sd, ph, e, loc: (
+            f"Update the SSN for {p} to {sd}. Current employer: {o}.",
+            [(p, "PER"), (sd, "SSN"), (o, "ORG")],
+        ),
+        lambda p, o, sd, ph, e, loc: (
+            f"Tax ID verification: {p}, taxpayer identification "
+            f"number {sd}, employed at {o}.",
+            [(p, "PER"), (sd, "SSN"), (o, "ORG")],
+        ),
+    ]
+
     person = fake.name()
     org = fake.company()
-    ssn = _ssn()
     phone = _phone()
     email = fake.email()
     location = fake.city()
 
-    template_fn = random.choice(templates)
-    text, entities = template_fn(person, org, ssn, phone, email, location)
+    # 40% chance of dashless SSN template.
+    if random.random() < 0.4:
+        ssn = _ssn(dashless=True)
+        template_fn = random.choice(dashless_templates)
+        text, entities = template_fn(person, org, ssn, phone, email, location)
+    else:
+        ssn = _ssn(dashless=False)
+        template_fn = random.choice(dashed_templates)
+        text, entities = template_fn(person, org, ssn, phone, email, location)
     return text, entities
 
 
@@ -240,12 +286,48 @@ def _clinical_sample() -> tuple[str, list[tuple[str, str]]]:
     return text, entities
 
 
-def generate_dataset(num_samples: int, output_path: Path) -> dict[str, int]:
-    """
-    Generate a mixed enterprise + clinical synthetic dataset.
+def _negative_sample() -> tuple[str, list[tuple[str, str]]]:
+    """Generate a sample with 9-digit numbers in NON-SSN contexts.
 
-    Splits roughly 60/40 enterprise/clinical to reflect expected
-    production traffic mix.
+    These are negative examples: 9-digit strings that appear near
+    phone/order/serial/tracking context words and should NOT be
+    classified as SSN. The numbers are IRS-structurally-valid so
+    the only distinguishing signal is surrounding context.
+    """
+    person = fake.name()
+    org = fake.company()
+    nine_digits = _ssn(dashless=True)  # Valid structure, but NOT an SSN
+
+    templates = [
+        lambda p, o, nd: (
+            f"Call {p} at phone number {nd} regarding the shipment from {o}.",
+            [(p, "PER"), (o, "ORG")],
+        ),
+        lambda p, o, nd: (
+            f"Tracking number {nd} for the order placed by {p} at {o}.",
+            [(p, "PER"), (o, "ORG")],
+        ),
+        lambda p, o, nd: (
+            f"Reference account number {nd} for {p} at {o} on the invoice.",
+            [(p, "PER"), (o, "ORG")],
+        ),
+        lambda p, o, nd: (
+            f"Serial number {nd} registered to {p} at {o}.",
+            [(p, "PER"), (o, "ORG")],
+        ),
+    ]
+
+    template_fn = random.choice(templates)
+    text, entities = template_fn(person, org, nine_digits)
+    return text, entities
+
+
+def generate_dataset(num_samples: int, output_path: Path) -> dict[str, int]:
+    """Generate a mixed enterprise + clinical + negative synthetic dataset.
+
+    Splits: 50% enterprise (mix of dashed and dashless SSNs), 35% clinical,
+    15% negative (9-digit numbers in non-SSN context for disambiguation
+    testing).
 
     Args:
         num_samples: Total number of samples to generate.
@@ -257,30 +339,32 @@ def generate_dataset(num_samples: int, output_path: Path) -> dict[str, int]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     entity_counts: dict[str, int] = {}
-    num_enterprise = int(num_samples * 0.6)
-    num_clinical = num_samples - num_enterprise
+    num_enterprise = int(num_samples * 0.50)
+    num_clinical = int(num_samples * 0.35)
+    num_negative = num_samples - num_enterprise - num_clinical
 
     samples: list[dict] = []
 
-    for _ in range(num_enterprise):
-        text, entities = _enterprise_sample()
-        tokens, ner_tags = _tokenize_and_label(text, entities)
-        tag_ids = [LABEL_TO_ID.get(tag, 0) for tag in ner_tags]
-        samples.append(
-            {"tokens": tokens, "ner_tags": tag_ids, "ner_tag_labels": ner_tags}
-        )
-        for _, etype in entities:
-            entity_counts[etype] = entity_counts.get(etype, 0) + 1
+    generators = (
+        [(_enterprise_sample, num_enterprise)]
+        + [(_clinical_sample, num_clinical)]
+        + [(_negative_sample, num_negative)]
+    )
 
-    for _ in range(num_clinical):
-        text, entities = _clinical_sample()
-        tokens, ner_tags = _tokenize_and_label(text, entities)
-        tag_ids = [LABEL_TO_ID.get(tag, 0) for tag in ner_tags]
-        samples.append(
-            {"tokens": tokens, "ner_tags": tag_ids, "ner_tag_labels": ner_tags}
-        )
-        for _, etype in entities:
-            entity_counts[etype] = entity_counts.get(etype, 0) + 1
+    for gen_fn, count in generators:
+        for _ in range(count):
+            text, entities = gen_fn()
+            tokens, ner_tags = _tokenize_and_label(text, entities)
+            tag_ids = [LABEL_TO_ID.get(tag, 0) for tag in ner_tags]
+            samples.append(
+                {
+                    "tokens": tokens,
+                    "ner_tags": tag_ids,
+                    "ner_tag_labels": ner_tags,
+                }
+            )
+            for _, etype in entities:
+                entity_counts[etype] = entity_counts.get(etype, 0) + 1
 
     random.shuffle(samples)
 

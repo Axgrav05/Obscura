@@ -14,11 +14,16 @@ Output:
     - Human-readable results table to stdout
     - JSON report saved to ml/results/<model>_<timestamp>.json
 
-Note: BERT NER models detect PER/LOC/ORG/MISC. Structured PII types
-(SSN, PHONE, EMAIL, MRN, DOB) are handled by the regex layer and are
-excluded from BERT-only evaluation. Hybrid pipeline metrics are tracked
-separately once the regex layer is integrated.
+Supports two evaluation modes:
+  - bert:   BERT-only (structured tags filtered to O). Original behavior.
+  - hybrid: Full BERT + regex pipeline, SSN ground truth evaluated.
+
+Note: BERT NER models detect PER/LOC/ORG/MISC. In hybrid mode, the regex
+layer additionally detects SSN. Other structured types (PHONE, EMAIL, MRN,
+DOB) are filtered to O until their regex patterns are implemented.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -27,6 +32,10 @@ import time
 import tracemalloc
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ml.pii_engine import PIIEngine  # noqa: F811
 
 import numpy as np
 import psutil
@@ -45,6 +54,9 @@ from transformers import (
 
 # Entity types that BERT NER models can detect. Others are regex-only.
 BERT_ENTITY_TYPES: set[str] = {"PER", "ORG", "LOC", "MISC"}
+
+# Entity types detectable by the full hybrid pipeline (BERT + regex SSN).
+HYBRID_ENTITY_TYPES: set[str] = BERT_ENTITY_TYPES | {"SSN"}
 
 
 def _get_memory_mb() -> float:
@@ -99,6 +111,32 @@ def filter_to_bert_tags(tags: list[str]) -> list[str]:
             # Extract entity type: B-PER -> PER, I-ORG -> ORG
             entity_type = tag.split("-", 1)[1] if "-" in tag else tag
             if entity_type in BERT_ENTITY_TYPES:
+                filtered.append(tag)
+            else:
+                filtered.append("O")
+    return filtered
+
+
+def filter_to_hybrid_tags(tags: list[str]) -> list[str]:
+    """Filter ground-truth tags to types detectable by the hybrid pipeline.
+
+    In hybrid mode, BERT detects PER/LOC/ORG/MISC and regex detects SSN.
+    Other structured types (PHONE, EMAIL, MRN, DOB) that don't yet have
+    regex patterns are filtered to O to avoid artificially lowering recall.
+
+    Args:
+        tags: Full BIO tag list from the synthetic dataset.
+
+    Returns:
+        Filtered tag list with only hybrid-detectable types.
+    """
+    filtered = []
+    for tag in tags:
+        if tag == "O":
+            filtered.append("O")
+        else:
+            entity_type = tag.split("-", 1)[1] if "-" in tag else tag
+            if entity_type in HYBRID_ENTITY_TYPES:
                 filtered.append(tag)
             else:
                 filtered.append("O")
@@ -160,18 +198,73 @@ def align_predictions_to_words(
     return pred_tags
 
 
+def align_hybrid_predictions_to_words(
+    tokens: list[str],
+    engine: PIIEngine,
+) -> list[str]:
+    """Run the hybrid PIIEngine (BERT + regex) and align to word-level BIO tags.
+
+    Unlike align_predictions_to_words (BERT-only), this uses PIIEngine.detect()
+    which includes regex detection and conflict resolution.
+
+    Args:
+        tokens: Original whitespace-tokenized word list.
+        engine: Loaded PIIEngine instance with regex enabled.
+
+    Returns:
+        BIO tag list aligned to input tokens.
+    """
+    text = " ".join(tokens)
+
+    # Build word offset mapping (same logic as BERT-only version).
+    word_offsets: list[tuple[int, int]] = []
+    pos = 0
+    for token in tokens:
+        start = text.index(token, pos)
+        end = start + len(token)
+        word_offsets.append((start, end))
+        pos = end
+
+    # Run hybrid detection.
+    entities = engine.detect(text)
+
+    # Reverse map from Presidio-style entity types back to BIO labels.
+    entity_to_bio: dict[str, str] = {
+        "PERSON": "PER",
+        "LOCATION": "LOC",
+        "ORGANIZATION": "ORG",
+        "MISC": "MISC",
+        "SSN": "SSN",
+    }
+
+    pred_tags = ["O"] * len(tokens)
+
+    for ent in entities:
+        bio_label = entity_to_bio.get(ent.entity_type, ent.entity_type)
+        for idx, (ws, we) in enumerate(word_offsets):
+            if ws < ent.end and we > ent.start:
+                if pred_tags[idx] == "O":
+                    if ws >= ent.start or idx == 0:
+                        pred_tags[idx] = f"B-{bio_label}"
+                    else:
+                        pred_tags[idx] = f"I-{bio_label}"
+
+    return pred_tags
+
+
 def run_evaluation(
     model_name: str,
     dataset_path: Path,
     limit: int | None = None,
+    mode: str = "hybrid",
 ) -> dict:
-    """
-    Run full evaluation: load model, infer on dataset, compute metrics.
+    """Run full evaluation: load model, infer on dataset, compute metrics.
 
     Args:
         model_name: HuggingFace model ID or local path.
         dataset_path: Path to synthetic JSONL dataset.
         limit: Max samples to evaluate.
+        mode: "bert" for BERT-only, "hybrid" for BERT + regex SSN.
 
     Returns:
         Results dictionary with metrics and metadata.
@@ -180,7 +273,7 @@ def run_evaluation(
     rss_before_mb = _get_memory_mb()
     tracemalloc.start()
 
-    print(f"Loading model: {model_name}")
+    print(f"Loading model: {model_name} (mode={mode})")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForTokenClassification.from_pretrained(model_name)
     ner_pipeline = pipeline(
@@ -190,6 +283,18 @@ def run_evaluation(
         aggregation_strategy="simple",
         device=-1,  # CPU — matches production target
     )
+
+    # For hybrid mode, wrap the pipeline in a PIIEngine with regex enabled.
+    engine = None
+    if mode == "hybrid":
+        try:
+            from ml.pii_engine import PIIEngine
+        except ModuleNotFoundError:
+            from pii_engine import PIIEngine  # type: ignore[no-redef]
+
+        engine = PIIEngine(model_id=model_name, enable_regex=True)
+        # Reuse the already-loaded pipeline to avoid double-loading.
+        engine._pipeline = ner_pipeline
 
     rss_after_load_mb = _get_memory_mb()
     model_rss_mb = rss_after_load_mb - rss_before_mb
@@ -205,11 +310,18 @@ def run_evaluation(
 
     for i, sample in enumerate(samples):
         tokens = sample["tokens"]
-        true_tags = filter_to_bert_tags(sample["ner_tag_labels"])
+
+        if mode == "bert":
+            true_tags = filter_to_bert_tags(sample["ner_tag_labels"])
+        else:
+            true_tags = filter_to_hybrid_tags(sample["ner_tag_labels"])
 
         # Measure inference latency.
         start_ns = time.perf_counter_ns()
-        pred_tags = align_predictions_to_words(tokens, ner_pipeline)
+        if mode == "bert":
+            pred_tags = align_predictions_to_words(tokens, ner_pipeline)
+        else:
+            pred_tags = align_hybrid_predictions_to_words(tokens, engine)
         end_ns = time.perf_counter_ns()
 
         latency_ms = (end_ns - start_ns) / 1_000_000
@@ -247,8 +359,20 @@ def run_evaluation(
         "max_ms": round(float(np.max(lat_array)), 2),
     }
 
+    if mode == "bert":
+        note = (
+            "BERT-only evaluation. SSN/PHONE/EMAIL/MRN/DOB ground truth "
+            "tags are filtered to O (handled by regex layer, not BERT)."
+        )
+    else:
+        note = (
+            "Hybrid evaluation (BERT + regex SSN). PHONE/EMAIL/MRN/DOB "
+            "ground truth tags filtered to O (regex patterns not yet added)."
+        )
+
     results = {
         "model": model_name,
+        "mode": mode,
         "dataset": str(dataset_path),
         "num_samples": len(samples),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -266,11 +390,7 @@ def run_evaluation(
             "tracemalloc_peak_mb": round(tracemalloc_peak_mb, 1),
         },
         "classification_report": report_str,
-        "note": (
-            "BERT-only evaluation. SSN/PHONE/EMAIL/MRN/DOB ground truth "
-            "tags are filtered to O (handled by regex layer, not BERT). "
-            "Hybrid pipeline metrics tracked separately."
-        ),
+        "note": note,
     }
 
     return results
@@ -383,6 +503,17 @@ def main() -> None:
         default=None,
         help="Max samples to evaluate (default: all)",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["bert", "hybrid"],
+        default="hybrid",
+        help=(
+            "Evaluation mode. 'bert': BERT-only (structured tags filtered "
+            "to O). 'hybrid': full BERT + regex pipeline, SSN tags "
+            "evaluated. (default: hybrid)"
+        ),
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset)
@@ -398,7 +529,9 @@ def main() -> None:
     all_results: list[dict] = []
 
     for model_name in args.model:
-        results = run_evaluation(model_name, dataset_path, limit=args.limit)
+        results = run_evaluation(
+            model_name, dataset_path, limit=args.limit, mode=args.mode
+        )
         print_results(results)
         saved_path = save_results(results, results_dir)
         print(f"\nResults saved to: {saved_path}\n")
