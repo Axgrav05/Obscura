@@ -1,16 +1,31 @@
-# Virtual environment
-.venv/
+# ===============================
+# Rust
+# ===============================
+/target
 
-# Python
+# (NOTE: Keep Cargo.lock if this becomes an application.
+# Remove this ignore if the team wants Cargo.lock committed.)
+
+# ===============================
+# macOS
+# ===============================
+.DS_Store
+
+# ===============================
+# Environment files
+# ===============================
+.env
+.env.*
+*.local
+
+# ===============================
+# Python / ML
+# ===============================
 __pycache__/
 *.py[cod]
+.venv/
 *.egg-info/
-
-# Linter/formatter caches
 .ruff_cache/
-
-# IDE
-.vscode/
 
 # Model artifacts (never commit weights)
 *.onnx
@@ -20,3 +35,14 @@ __pycache__/
 
 # Benchmark results (local, timestamped)
 ml/results/
+
+# ===============================
+# IDE / Editor
+# ===============================
+.vscode/
+.idea/
+
+# ===============================
+# Logs
+# ===============================
+*.log
