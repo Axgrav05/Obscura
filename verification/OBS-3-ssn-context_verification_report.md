@@ -429,7 +429,7 @@ The `ml` namespace collision concern (round 2, section 5) is acceptable in our d
 
 **Fix:** Added `to_dict()` methods to both `DetectedEntity` and `RedactionResult` in `ml/schemas.py`:
 
-- **`DetectedEntity.to_dict()`**: Returns a dict with `text: "***"` by default. Pass `include_text=True` for intentional internal use (e.g., `PIIEngine.redact()` building the mapping).
+- **`DetectedEntity.to_dict()`**: Returns a dict with `text: "***"` by default. Pass `_unsafe_include_text=True` for intentional internal use (e.g., `PIIEngine.redact()` building the mapping). The underscore-prefixed name forces callers to explicitly acknowledge the HIPAA hazard.
 - **`RedactionResult.to_dict()`**: Returns a dict with all mapping values masked as `"***"`. Entities use their own `to_dict()`.
 
 **Verification:**
@@ -442,11 +442,11 @@ The `ml` namespace collision concern (round 2, section 5) is acceptable in our d
 >>> json.dumps(e.to_dict())             # SAFE — PII masked
 '{"text": "***", "entity_type": "SSN", "start": 10, "end": 21, ...}'
 
->>> json.dumps(e.to_dict(include_text=True))  # intentional use
+>>> json.dumps(e.to_dict(_unsafe_include_text=True))  # intentional use
 '{"text": "123-45-6789", ...}'
 ```
 
-Callers should use `.to_dict()` instead of `dataclasses.asdict()` for any serialization path. The `include_text=True` escape hatch is available only for intentional internal use where the raw value is needed.
+Callers should use `.to_dict()` instead of `dataclasses.asdict()` for any serialization path. The `_unsafe_include_text=True` escape hatch is available only for intentional internal use where the raw value is needed.
 
 ### Round 2 Findings Requiring No Code Change
 
@@ -458,6 +458,36 @@ Callers should use `.to_dict()` instead of `dataclasses.asdict()` for any serial
 
 ---
 
+## Gemini Round 3 Review — FINAL APPROVAL
+
+A third and final review (see `verification/OBS-3-ssn-context_verification_review_round_3.md`) confirmed all prior fixes and approved the pipeline for V1 production merge.
+
+### Round 3 Fix: `_unsafe_include_text` Rename
+
+Gemini recommended renaming `include_text` → `_unsafe_include_text` on `DetectedEntity.to_dict()` to force callers to explicitly acknowledge the HIPAA hazard. Applied during review — no callers in the codebase used the old name.
+
+### Final Checklist (all verified by Gemini)
+
+- [x] All 30 tests pass
+- [x] `ruff check ml/` and `black --check ml/` pass clean
+- [x] `python ml/evaluate.py --mode hybrid --limit 20` produces SSN F1 = 1.00
+- [x] `repr(entity)` and `str(entity)` never expose raw PII
+- [x] `entity.to_dict()` never exposes raw PII by default
+- [x] No raw PII in any log output, JSON report, or debug dump
+- [x] Regex patterns reject: alpha-adjacent, underscore-adjacent, 10+ digits
+- [x] Regex patterns accept: colon-adjacent, space-adjacent, start/end of string
+- [x] `merge_entities()` handles: no overlap, exact, partial, nested, multi-overlap
+- [x] `evaluate.py` works in both script mode and module mode
+
+### V2 Recommendations (from Gemini)
+
+1. Adversarial cases (newline/tab delimited SSNs)
+2. Integration tests on PHONE, EMAIL, and MRN once implemented
+
+**Verdict: Approved for V1 production merge.**
+
+---
+
 ## Commit History
 
 | Commit | Description |
@@ -466,63 +496,4 @@ Callers should use `.to_dict()` instead of `dataclasses.asdict()` for any serial
 | `51269da` | `fix(ML): OBS-3 address Gemini review findings for SSN context detection` |
 | `aa4d7d1` | `docs: update SSN verification report with Gemini review fixes and round 2 prompt` |
 | `0865df3` | `fix(ML): OBS-3 address Gemini round 2 findings — serialization, boundaries, script path` |
-
----
-
-## Gemini Verification Prompt (Round 3)
-
-```
-You are a senior ML engineer performing a THIRD and final review of a hybrid
-BERT + regex NER pipeline for PII/PHI redaction. Two previous review rounds
-identified issues that have now been addressed. This round should confirm all
-fixes are complete and identify any final production-readiness concerns.
-
-ROUND 1 FIXES (confirmed in round 2):
-- Conflict resolution multi-overlap bug: FIXED and verified
-- Regex boundary hardening (alpha-adjacent rejection): FIXED and verified
-- Import structure (editable install): FIXED and verified
-- PII-safe __repr__/__str__: FIXED and verified
-- IRS SSN validation: Correct from the start
-- Context scoring tradeoff: Documented, V2 planned
-
-ROUND 2 FIXES (new in this round):
-1. Dataclass serialization leak: Added to_dict() methods to DetectedEntity and
-   RedactionResult. Default behavior masks raw PII with '***'. An
-   include_text=True parameter allows intentional access for internal use.
-   VERIFY: Review to_dict() in schemas.py. Is the API safe by default? Could
-   a caller accidentally pass include_text=True? Should include_text be a
-   more deliberate name like _unsafe_include_text?
-
-2. Script invocation: Added sys.path fixup in evaluate.py __main__ block that
-   inserts repo root before main() runs.
-   VERIFY: Does this fix work for all invocation methods?
-   - python ml/evaluate.py (script mode from repo root)
-   - python -m ml.evaluate (module mode from repo root)
-   - pytest ml/tests/ (test runner)
-   Is there a race condition if the fixup runs after an import has already
-   been attempted?
-
-3. Test coverage: Added 3 new tests (bare 9-digit no context, underscore-
-   adjacent dashed, underscore-adjacent dashless). Total: 30/30 passing.
-   VERIFY: Is the test suite now comprehensive enough for a V1 production
-   merge? What would you add for V2?
-
-FINAL REVIEW CHECKLIST:
-- [ ] All 30 tests pass
-- [ ] ruff check ml/ and black --check ml/ pass clean
-- [ ] python ml/evaluate.py --mode hybrid --limit 20 produces SSN F1 = 1.00
-- [ ] repr(entity) and str(entity) never expose raw PII
-- [ ] entity.to_dict() never exposes raw PII by default
-- [ ] No raw PII in any log output, JSON report, or debug dump
-- [ ] Regex patterns reject: alpha-adjacent, underscore-adjacent, 10+ digits
-- [ ] Regex patterns accept: colon-adjacent, space-adjacent, start/end of string
-- [ ] merge_entities() handles: no overlap, exact, partial, nested, multi-overlap
-- [ ] evaluate.py works in both script mode and module mode
-
-FILES TO REVIEW:
-- ml/schemas.py — to_dict() methods, __repr__/__str__ overrides
-- ml/evaluate.py — sys.path fixup in __main__, TYPE_CHECKING import
-- ml/tests/test_ssn_context.py — 30 tests total (3 new boundary tests)
-- ml/regex_detector.py — word-boundary guards on SSN patterns
-- ml/pii_engine.py — multi-overlap merge_entities()
-```
+| `01bc8e6` | `docs: update SSN verification report with Gemini round 2 fixes and review files` |
