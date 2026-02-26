@@ -50,10 +50,10 @@ class DetectedEntity:
             f"({self.start}:{self.end}) score={self.score:.2f}]"
         )
 
-    def to_dict(self, *, include_text: bool = False) -> dict:
+    def to_dict(self, *, _unsafe_include_text: bool = False) -> dict:
         """Return a PII-safe dictionary for JSON serialization.
 
-        By default, replaces raw text with '***'. Pass include_text=True
+        By default, replaces raw text with '***'. Pass _unsafe_include_text=True
         only when the raw value is intentionally needed (e.g., building
         the mapping dictionary inside PIIEngine.redact()).
 
@@ -61,7 +61,7 @@ class DetectedEntity:
         PII exposure through json.dumps().
         """
         return {
-            "text": self.text if include_text else "***",
+            "text": self.text if _unsafe_include_text else "***",
             "entity_type": self.entity_type,
             "start": self.start,
             "end": self.end,
