@@ -27,12 +27,8 @@ from transformers import (
     pipeline,
 )
 
-try:
-    from ml.regex_detector import RegexDetector
-    from ml.schemas import DetectedEntity, RedactionResult
-except ModuleNotFoundError:
-    from regex_detector import RegexDetector  # type: ignore[no-redef]
-    from schemas import DetectedEntity, RedactionResult  # type: ignore[no-redef]
+from ml.regex_detector import RegexDetector
+from ml.schemas import DetectedEntity, RedactionResult
 
 # Mapping from BERT NER labels to Presidio-style entity categories.
 # dslim/bert-base-NER produces B-/I- prefixed IOB2 tags for:
@@ -123,24 +119,34 @@ def merge_entities(
     merged: list[DetectedEntity] = []
 
     for candidate in all_entities:
-        conflict_found = False
+        # Find ALL accepted entities that overlap with the candidate.
+        conflict_indices: list[int] = []
         for i, accepted in enumerate(merged):
             overlap = _classify_overlap(accepted, candidate)
-            if overlap == "none":
-                continue
+            if overlap != "none":
+                conflict_indices.append(i)
 
-            conflict_found = True
+        if not conflict_indices:
+            merged.append(candidate)
+            continue
+
+        # Resolve each conflict. Candidate must win all to be accepted.
+        candidate_wins_all = True
+        for i in conflict_indices:
+            accepted = merged[i]
+            overlap = _classify_overlap(accepted, candidate)
             if overlap == "exact":
                 winner = _resolve_exact_overlap(accepted, candidate)
             else:
-                # Rules 2 (partial) and 3 (nested): longer span wins.
                 winner = _resolve_by_length(accepted, candidate)
+            if winner is not candidate:
+                candidate_wins_all = False
+                break
 
-            if winner is candidate:
-                merged[i] = candidate
-            break
-
-        if not conflict_found:
+        if candidate_wins_all:
+            # Remove all conflicting entities (reverse order preserves indices).
+            for i in reversed(conflict_indices):
+                merged.pop(i)
             merged.append(candidate)
 
     merged.sort(key=lambda e: e.start)

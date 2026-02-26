@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ml.pii_engine import PIIEngine  # noqa: F811
+    from ml.pii_engine import PIIEngine
 
 import numpy as np
 import psutil
@@ -287,10 +287,7 @@ def run_evaluation(
     # For hybrid mode, wrap the pipeline in a PIIEngine with regex enabled.
     engine = None
     if mode == "hybrid":
-        try:
-            from ml.pii_engine import PIIEngine
-        except ModuleNotFoundError:
-            from pii_engine import PIIEngine  # type: ignore[no-redef]
+        from ml.pii_engine import PIIEngine
 
         engine = PIIEngine(model_id=model_name, enable_regex=True)
         # Reuse the already-loaded pipeline to avoid double-loading.

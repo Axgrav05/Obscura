@@ -20,10 +20,7 @@ are recorded.
 import re
 from dataclasses import dataclass, field
 
-try:
-    from ml.schemas import DetectedEntity
-except ModuleNotFoundError:
-    from schemas import DetectedEntity  # type: ignore[no-redef]
+from ml.schemas import DetectedEntity
 
 # --- SSN Context Scoring Constants ---
 
@@ -124,18 +121,20 @@ class RegexDetector:
         """Compile regex patterns once at construction time."""
         # Dashed SSN: XXX-XX-XXXX with IRS-valid structure.
         # Lookaheads prevent 000/666/9XX area, 00 group, 0000 serial.
+        # Word-character lookbehind/lookahead rejects alpha-adjacent
+        # matches like "A123-45-6789B" (not real SSNs).
         self._ssn_dashed = re.compile(
-            r"(?<!\d)"
+            r"(?<!\w)"
             r"(?!000|666|9\d\d)(\d{3})"
             r"-"
             r"(?!00)(\d{2})"
             r"-"
             r"(?!0000)(\d{4})"
-            r"(?!\d)"
+            r"(?!\w)"
         )
         # Dashless SSN: exactly 9 consecutive digits, not embedded in
-        # a longer digit string.
-        self._ssn_dashless = re.compile(r"(?<!\d)(\d{9})(?!\d)")
+        # a longer alphanumeric string.
+        self._ssn_dashless = re.compile(r"(?<!\w)(\d{9})(?!\w)")
 
     def detect(self, text: str) -> list[DetectedEntity]:
         """Run all regex patterns against input text.

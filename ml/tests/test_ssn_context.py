@@ -160,6 +160,33 @@ class TestDashlessSSNContext:
         entities = detector.detect(text)
         assert len(entities) == 0  # Score 0.40 < threshold 0.70
 
+    def test_multiple_ssns_in_one_string(self, detector: RegexDetector) -> None:
+        """Multiple dashed SSNs in a single string are all detected."""
+        text = "SSN: 123-45-6789 and SSN: 234-56-7890 on file."
+        entities = detector.detect(text)
+        assert len(entities) == 2
+        assert entities[0].text == "123-45-6789"
+        assert entities[1].text == "234-56-7890"
+
+    def test_alpha_adjacent_dashed_rejected(self, detector: RegexDetector) -> None:
+        """Dashed SSN flush against letters is not a real SSN."""
+        text = "CodeA123-45-6789B is not an SSN."
+        entities = detector.detect(text)
+        assert len(entities) == 0
+
+    def test_alpha_adjacent_dashless_rejected(self, detector: RegexDetector) -> None:
+        """Dashless 9-digit number flush against letters is rejected."""
+        text = "The SSN is REF123456789X per the form."
+        entities = detector.detect(text)
+        assert len(entities) == 0
+
+    def test_ssn_after_colon_accepted(self, detector: RegexDetector) -> None:
+        """SSN after punctuation (colon) is still detected — colon is not \\w."""
+        text = "SSN:123-45-6789"
+        entities = detector.detect(text)
+        assert len(entities) == 1
+        assert entities[0].text == "123-45-6789"
+
 
 # ---------------------------------------------------------------------------
 # Merge / conflict resolution
@@ -202,6 +229,33 @@ class TestMergeEntities:
         merged = merge_entities([outer, inner], [])
         assert len(merged) == 1
         assert merged[0].text == "John Smith Jr"
+
+    def test_three_way_overlap_long_span_wins(self) -> None:
+        """A long span overlapping two shorter accepted spans replaces both."""
+        # "John Smith Jr from Acme" as one long PERSON span overlaps
+        # with both "John Smith" (PERSON) and "Acme" (ORG).
+        short_a = DetectedEntity("John Smith", "PERSON", 0, 10, 0.95, "", "bert")
+        short_b = DetectedEntity("Acme", "ORG", 19, 23, 0.90, "", "bert")
+        long_span = DetectedEntity(
+            "John Smith Jr from Acme", "PERSON", 0, 23, 0.88, "", "bert"
+        )
+        merged = merge_entities([short_a, short_b, long_span], [])
+        # Long span is longer than both shorts, so it should win and
+        # replace both, yielding exactly one entity.
+        assert len(merged) == 1
+        assert merged[0].text == "John Smith Jr from Acme"
+
+    def test_three_way_overlap_short_wins(self) -> None:
+        """If a candidate is shorter than an accepted entity, accepted survives."""
+        long_span = DetectedEntity(
+            "John Smith Jr from Acme", "PERSON", 0, 23, 0.88, "", "bert"
+        )
+        short_a = DetectedEntity("John", "PERSON", 0, 4, 0.95, "", "bert")
+        # long_span is sorted first (earlier start, longer length), then short_a.
+        # short_a overlaps long_span but is shorter, so long_span wins.
+        merged = merge_entities([long_span, short_a], [])
+        assert len(merged) == 1
+        assert merged[0].text == "John Smith Jr from Acme"
 
     def test_empty_inputs(self) -> None:
         """Empty inputs return empty list."""
