@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 import tracemalloc
 from datetime import datetime, timezone
@@ -539,4 +540,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Ensure the repository root is on sys.path for script-mode invocation.
+    # `python ml/evaluate.py` prepends ml/ to sys.path[0], but ml.* imports
+    # require the repo root (parent of ml/) on the path.
+    _repo_root = str(Path(__file__).resolve().parent.parent)
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+
     main()

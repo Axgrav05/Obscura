@@ -50,6 +50,26 @@ class DetectedEntity:
             f"({self.start}:{self.end}) score={self.score:.2f}]"
         )
 
+    def to_dict(self, *, include_text: bool = False) -> dict:
+        """Return a PII-safe dictionary for JSON serialization.
+
+        By default, replaces raw text with '***'. Pass include_text=True
+        only when the raw value is intentionally needed (e.g., building
+        the mapping dictionary inside PIIEngine.redact()).
+
+        Use this instead of dataclasses.asdict() to prevent accidental
+        PII exposure through json.dumps().
+        """
+        return {
+            "text": self.text if include_text else "***",
+            "entity_type": self.entity_type,
+            "start": self.start,
+            "end": self.end,
+            "score": self.score,
+            "token": self.token,
+            "source": self.source,
+        }
+
 
 @dataclass
 class RedactionResult:
@@ -68,3 +88,20 @@ class RedactionResult:
             f"entities={self.entities!r}, mapping={safe_mapping!r}, "
             f"session_id={self.session_id!r})"
         )
+
+    def to_dict(self) -> dict:
+        """Return a PII-safe dictionary for JSON serialization.
+
+        Masks mapping values (raw PII) with '***'. The masked_text
+        (which already has tokens like [SSN_1] substituted) is safe
+        to include.
+
+        Use this instead of dataclasses.asdict() to prevent accidental
+        PII exposure through json.dumps().
+        """
+        return {
+            "masked_text": self.masked_text,
+            "entities": [e.to_dict() for e in self.entities],
+            "mapping": {k: "***" for k in self.mapping},
+            "session_id": self.session_id,
+        }

@@ -187,6 +187,25 @@ class TestDashlessSSNContext:
         assert len(entities) == 1
         assert entities[0].text == "123-45-6789"
 
+    def test_bare_nine_digits_no_context(self, detector: RegexDetector) -> None:
+        """A bare 9-digit string with zero surrounding context is rejected."""
+        entities = detector.detect("123456789")
+        assert len(entities) == 0  # Score 0.40 < threshold 0.70
+
+    def test_underscore_adjacent_dashed_rejected(self, detector: RegexDetector) -> None:
+        """Underscore is \\w, so SSN_123-45-6789 is rejected as not a real SSN."""
+        text = "Field SSN_123-45-6789 in the form."
+        entities = detector.detect(text)
+        assert len(entities) == 0
+
+    def test_underscore_adjacent_dashless_rejected(
+        self, detector: RegexDetector
+    ) -> None:
+        """Underscore-prefixed dashless 9-digit number is rejected."""
+        text = "Use ID_123456789 for the SSN lookup."
+        entities = detector.detect(text)
+        assert len(entities) == 0
+
 
 # ---------------------------------------------------------------------------
 # Merge / conflict resolution
