@@ -1,0 +1,45 @@
+[project]
+name = "obscura-ml"
+version = "0.1.0"
+description = "BERT-NER PII/PHI redaction engine for Obscura proxy"
+requires-python = ">=3.11"
+
+dependencies = [
+    "transformers",
+    "torch",
+    "optimum",
+    "onnxruntime",
+    "scispacy",
+    "datasets",
+    "seqeval",
+    "psutil",
+    "pandas",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "faker",
+    "ruff",
+    "black",
+    "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["ml", "ml.*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.black]
+target-version = ["py311"]
+line-length = 88

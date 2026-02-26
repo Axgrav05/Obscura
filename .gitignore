@@ -19,11 +19,22 @@
 *.local
 
 # ===============================
-# Python (if ML scripts added later)
+# Python / ML
 # ===============================
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
+*.egg-info/
+.ruff_cache/
+
+# Model artifacts (never commit weights)
+*.onnx
+*.bin
+*.pt
+*.safetensors
+
+# Benchmark results (local, timestamped)
+ml/results/
 
 # ===============================
 # IDE / Editor
