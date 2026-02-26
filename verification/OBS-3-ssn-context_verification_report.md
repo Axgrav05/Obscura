@@ -298,7 +298,7 @@ The reviewer identified three missing edge cases. All now have tests:
 
 **Regex boundary fix:** Changed `(?<!\d)` / `(?!\d)` to `(?<!\w)` / `(?!\w)` on both SSN patterns. This rejects alpha-adjacent matches (`A123-45-6789B`) while still accepting punctuation-adjacent ones (`SSN:123-45-6789`), since `:` is not a word character.
 
-Test count: **21 → 27** (6 new tests, all passing).
+Test count: **21 → 27** (6 new tests, all passing). See Round 2 below for 3 additional tests.
 
 ### Finding 5: Import Structure — FIXED
 
@@ -387,86 +387,142 @@ Input Text
 
 ---
 
+## Gemini Round 2 Review Findings and Fixes
+
+A second review (see `verification/OBS-3-ssn-context_verification_review_round_2.md`) confirmed the round 1 fixes were correct and identified three remaining issues.
+
+### Round 2 Finding 4: Additional Test Coverage Gaps — FIXED
+
+> **Remaining Issues:** Tests don't cover bare 9-digit string without context, or underscore-adjacent boundaries (`_` is `\w`).
+
+**Fix:** Added 3 new tests:
+
+| Missing Case | Test Added | Result |
+|---|---|---|
+| Bare `"123456789"` with no surrounding context | `test_bare_nine_digits_no_context` | PASS — rejected (score 0.40) |
+| Underscore-adjacent dashed (`SSN_123-45-6789`) | `test_underscore_adjacent_dashed_rejected` | PASS — rejected (`_` is `\w`) |
+| Underscore-adjacent dashless (`ID_123456789`) | `test_underscore_adjacent_dashless_rejected` | PASS — rejected |
+
+Test count: **27 → 30** (3 new tests, all passing).
+
+### Round 2 Finding 5: Script Invocation Failure — FIXED
+
+> **Remaining Issues:** Running `python ml/evaluate.py` directly throws `ModuleNotFoundError` because Python prepends `ml/` to `sys.path[0]`.
+
+**Fix:** Added a `sys.path` fixup in the `if __name__ == "__main__"` block of `evaluate.py`:
+
+```python
+if __name__ == "__main__":
+    _repo_root = str(Path(__file__).resolve().parent.parent)
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    main()
+```
+
+This inserts the repo root before `main()` runs, ensuring all `from ml.*` imports resolve correctly in script mode. Verified with `python ml/evaluate.py --help`.
+
+The `ml` namespace collision concern (round 2, section 5) is acceptable in our dedicated internal virtualenv and does not require action.
+
+### Round 2 Finding 6: Dataclass Serialization Leak — FIXED
+
+> **Remaining Issues:** `dataclasses.asdict(entity)` bypasses `__repr__` and exposes raw PII through `json.dumps()`.
+
+**Fix:** Added `to_dict()` methods to both `DetectedEntity` and `RedactionResult` in `ml/schemas.py`:
+
+- **`DetectedEntity.to_dict()`**: Returns a dict with `text: "***"` by default. Pass `include_text=True` for intentional internal use (e.g., `PIIEngine.redact()` building the mapping).
+- **`RedactionResult.to_dict()`**: Returns a dict with all mapping values masked as `"***"`. Entities use their own `to_dict()`.
+
+**Verification:**
+```python
+>>> e = DetectedEntity('123-45-6789', 'SSN', 10, 21, 0.99, '[SSN_1]', 'regex')
+
+>>> json.dumps(dataclasses.asdict(e))   # UNSAFE — raw SSN exposed
+'{"text": "123-45-6789", ...}'
+
+>>> json.dumps(e.to_dict())             # SAFE — PII masked
+'{"text": "***", "entity_type": "SSN", "start": 10, "end": 21, ...}'
+
+>>> json.dumps(e.to_dict(include_text=True))  # intentional use
+'{"text": "123-45-6789", ...}'
+```
+
+Callers should use `.to_dict()` instead of `dataclasses.asdict()` for any serialization path. The `include_text=True` escape hatch is available only for intentional internal use where the raw value is needed.
+
+### Round 2 Findings Requiring No Code Change
+
+| Finding | Status | Rationale |
+|---|---|---|
+| Section 2: Additional mixed-context false negatives ("Do not fax this Social Security number") | Documented V1 tradeoff | Conservative bias is intentional; V2 learned classifier planned |
+| Section 3: Conflict resolution | Confirmed fixed | Identity check and reverse-order pop verified correct |
+| Section 5: `ml` namespace collision | Acceptable | Dedicated internal virtualenv; no shared ML packages |
+
+---
+
 ## Commit History
 
 | Commit | Description |
 |--------|-------------|
 | `bd390dc` | `feat(ML): OBS-3 add context-aware SSN detection with hybrid BERT+regex pipeline` |
 | `51269da` | `fix(ML): OBS-3 address Gemini review findings for SSN context detection` |
+| `aa4d7d1` | `docs: update SSN verification report with Gemini review fixes and round 2 prompt` |
+| `0865df3` | `fix(ML): OBS-3 address Gemini round 2 findings — serialization, boundaries, script path` |
 
 ---
 
-## Gemini Verification Prompt (Round 2)
+## Gemini Verification Prompt (Round 3)
 
 ```
-You are a senior ML engineer performing a SECOND review of a hybrid BERT + regex
-NER pipeline for PII/PHI redaction. A previous review identified six findings.
-Five have been addressed with code changes; one was documented as an intentional
-design tradeoff. Please verify that each fix is correct and complete, and
-identify any remaining issues.
+You are a senior ML engineer performing a THIRD and final review of a hybrid
+BERT + regex NER pipeline for PII/PHI redaction. Two previous review rounds
+identified issues that have now been addressed. This round should confirm all
+fixes are complete and identify any final production-readiness concerns.
 
-PREVIOUS FINDINGS AND CLAIMED FIXES:
+ROUND 1 FIXES (confirmed in round 2):
+- Conflict resolution multi-overlap bug: FIXED and verified
+- Regex boundary hardening (alpha-adjacent rejection): FIXED and verified
+- Import structure (editable install): FIXED and verified
+- PII-safe __repr__/__str__: FIXED and verified
+- IRS SSN validation: Correct from the start
+- Context scoring tradeoff: Documented, V2 planned
 
-1. IRS SSN Validation — No change needed (confirmed correct in first review).
+ROUND 2 FIXES (new in this round):
+1. Dataclass serialization leak: Added to_dict() methods to DetectedEntity and
+   RedactionResult. Default behavior masks raw PII with '***'. An
+   include_text=True parameter allows intentional access for internal use.
+   VERIFY: Review to_dict() in schemas.py. Is the API safe by default? Could
+   a caller accidentally pass include_text=True? Should include_text be a
+   more deliberate name like _unsafe_include_text?
 
-2. Context Scoring Logic — Acknowledged as V1 tradeoff. Mixed-context sentences
-   (both trigger and negative words present) are conservatively rejected.
-   VERIFY: Is this tradeoff adequately documented? Are there additional
-   mixed-context scenarios beyond the one identified that could be problematic?
+2. Script invocation: Added sys.path fixup in evaluate.py __main__ block that
+   inserts repo root before main() runs.
+   VERIFY: Does this fix work for all invocation methods?
+   - python ml/evaluate.py (script mode from repo root)
+   - python -m ml.evaluate (module mode from repo root)
+   - pytest ml/tests/ (test runner)
+   Is there a race condition if the fixup runs after an import has already
+   been attempted?
 
-3. Conflict Resolution Multi-Overlap Bug — FIXED. merge_entities() now collects
-   ALL overlapping indices, resolves candidate against each, and only accepts
-   candidate if it wins all conflicts. Losers are removed in reverse index order.
-   VERIFY: Read the new merge_entities() implementation in pii_engine.py. Does
-   the fix correctly handle: (a) candidate overlapping 3+ accepted entities,
-   (b) candidate losing to one accepted but winning against another, (c) empty
-   conflict_indices path? Check that reverse-order pop() preserves valid indices.
+3. Test coverage: Added 3 new tests (bare 9-digit no context, underscore-
+   adjacent dashed, underscore-adjacent dashless). Total: 30/30 passing.
+   VERIFY: Is the test suite now comprehensive enough for a V1 production
+   merge? What would you add for V2?
 
-4. Test Coverage — FIXED. Added 6 new tests:
-   - test_multiple_ssns_in_one_string
-   - test_alpha_adjacent_dashed_rejected
-   - test_alpha_adjacent_dashless_rejected
-   - test_ssn_after_colon_accepted
-   - test_three_way_overlap_long_span_wins
-   - test_three_way_overlap_short_wins
-   VERIFY: Are these tests sufficient to cover the gaps identified in round 1?
-   Are there still missing edge cases (e.g., SSN at very start/end of text with
-   no surrounding context, underscore-adjacent like ID_123456789, or SSN inside
-   a larger numeric string like 1234567890)?
-
-5. Import Structure — FIXED. Replaced try/except with editable install:
-   - Added [build-system] and [tool.setuptools.packages.find] to pyproject.toml
-   - pip install -e . installs ml as a package
-   - All imports use consistent from ml.* paths
-   - evaluate.py uses TYPE_CHECKING + from __future__ import annotations
-   VERIFY: Is the pyproject.toml configuration correct? Does
-   where=[".."], include=["ml", "ml.*"] correctly discover the package from
-   the ml/ directory? Could this break if the repo is cloned to a different
-   path or if another ml/ package exists in the environment?
-
-6. Security / HIPAA — FIXED. Added __repr__ and __str__ to DetectedEntity and
-   RedactionResult that mask raw PII with '***'.
-   VERIFY: Read schemas.py. Does the __repr__ override cover all PII-containing
-   fields? Is there a path where raw PII could still leak (e.g., dataclasses
-   asdict(), JSON serialization via dataclasses.asdict() + json.dumps, or
-   direct attribute access in f-strings)? Should we also add __format__?
+FINAL REVIEW CHECKLIST:
+- [ ] All 30 tests pass
+- [ ] ruff check ml/ and black --check ml/ pass clean
+- [ ] python ml/evaluate.py --mode hybrid --limit 20 produces SSN F1 = 1.00
+- [ ] repr(entity) and str(entity) never expose raw PII
+- [ ] entity.to_dict() never exposes raw PII by default
+- [ ] No raw PII in any log output, JSON report, or debug dump
+- [ ] Regex patterns reject: alpha-adjacent, underscore-adjacent, 10+ digits
+- [ ] Regex patterns accept: colon-adjacent, space-adjacent, start/end of string
+- [ ] merge_entities() handles: no overlap, exact, partial, nested, multi-overlap
+- [ ] evaluate.py works in both script mode and module mode
 
 FILES TO REVIEW:
-- ml/schemas.py — DetectedEntity/RedactionResult with __repr__/__str__ overrides
-- ml/regex_detector.py — word-boundary guards (?<!\w)/(?!\w) on SSN patterns
-- ml/pii_engine.py — rewritten merge_entities() with multi-overlap resolution
-- ml/tests/test_ssn_context.py — 27 tests (6 new edge cases)
-- ml/evaluate.py — clean imports with TYPE_CHECKING guard
-- ml/pyproject.toml — [build-system] and package discovery config
-
-ADDITIONAL REVIEW POINTS:
-- The regex patterns now use (?<!\w) and (?!\w) instead of (?<!\d) and (?!\d).
-  Does this correctly reject A123-45-6789B while accepting SSN:123-45-6789?
-  Are there legitimate SSN contexts where the number might follow a word
-  character (e.g., "SSN#123-45-6789" where # is stripped but digits are not)?
-- The merge algorithm uses `winner is not candidate` (identity check, not
-  equality). Is this correct given that _resolve_by_length and
-  _resolve_exact_overlap return one of the two input objects by reference?
-- With the editable install, does `python ml/evaluate.py` still work as a
-  standalone script, or must it now be invoked as `python -m ml.evaluate`?
+- ml/schemas.py — to_dict() methods, __repr__/__str__ overrides
+- ml/evaluate.py — sys.path fixup in __main__, TYPE_CHECKING import
+- ml/tests/test_ssn_context.py — 30 tests total (3 new boundary tests)
+- ml/regex_detector.py — word-boundary guards on SSN patterns
+- ml/pii_engine.py — multi-overlap merge_entities()
 ```
