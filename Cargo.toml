@@ -1,6 +1,12 @@
-[package]
-name = "Obscura"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "config",
+    "inference",
+    "proxy",
+]
+resolver = "2"
 
-[dependencies]
+# Centralized dependencies for workspace-wide consistency
+[workspace.dependencies]
+tokio = { version = "1.37", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
