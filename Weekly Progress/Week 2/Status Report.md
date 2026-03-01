@@ -17,11 +17,15 @@
 |**Eduardo** | - Set up Grafana Cloud workspace<br>- Configured Prometheus datasource<br>- Created Compliance, Redaction Detail, and Performance dashboards | - Implement /metrics endpoint in Rust proxy<br>- Add Prometheus counters and latency histogram<br>- Deploy Prometheus via Docker<br>- Configure scrape targets<br>- Verify metrics appear in Performance dashboard | - Grafana Cloud Free plan limited to one stack, auto-named after account rather than project, and restricted to a maximum of 3 team members. | 4 hrs |
 | **Billy** |- Identified attack surfaces for standalone proxy architecture<br>- Ranked potential threats and created severity/likelihood risk matrix<br>- Developed 8+ threat model with technical mitigations<br>- Mapped threats and remediations to correct Jira tickets (traceability matrix)<br>- Created HIPAA/GDPR minimum viable compliance checklist | - Write technical specification for API key authentication<br>- Define key storage via environment variable<br>- Specify constant-time validation approach<br>- Define standardized error responses (401, 403, 429)<br>- Design rate limit integration plan (design doc only — implementation in Sprint 4)<br>- Complete OBS-12a: Write auth flow specification<br>- Complete OBS-12b: Define error response format (401, 403, 429)<br>- Complete OBS-12c: Review with Rainier for implementation feasibility | No major issues. | 4 hrs |
 
-**Total Team Time Spent:** [Sum] Hours
+**Total Team Time Spent:** 30-34 Hours
 
 ---
 
 ## Weekly Summary
-[Provide a high-level overview of the team's progress and the current state of the project.]
 
-The ML team successfully finalized the hybrid BERT + regex pipeline for PII/PHI redaction, completing 3 rounds of verification. The engine correctly masks semantic entities via standard NER while enforcing structure/context disambiguation on SSNs, passing all 30 robust boundary tests with an F1 score of 1.00.
+This week, the team made significant strides across all major components of the Obscura project, investing approximately 30-34 hours of effort.
+
+- **Machine Learning**: The ML team successfully finalized the hybrid BERT + regex pipeline for PII/PHI redaction, completing 3 rounds of verification. The engine correctly masks semantic entities via standard NER while enforcing structure/context disambiguation on SSNs, passing all 30 robust boundary tests with an F1 score of 1.00.
+- **Backend & Repository**: The Rust workspace was initialized with a basic async HTTP server. The monorepo structure was finalized along with configuration standards (`obscura.toml`) and pre-commit hooks.
+- **DevOps & Telemetry**: Deployment pipelines were established using GitHub Actions to build and push Docker images to AWS ECR/EC2. Additionally, a Grafana Cloud workspace was set up with Prometheus dashboards to monitor compliance, redaction details, and performance.
+- **Security & Compliance**: A comprehensive threat model (identifying 8+ threats) was developed alongside a risk matrix and a HIPAA/GDPR minimum viable compliance checklist to ensure a robust security posture.
