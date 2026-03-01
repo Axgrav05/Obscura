@@ -177,7 +177,7 @@ class PIIEngine:
 
     model_id: str = MODEL_ID
     device: str = "cpu"
-    confidence_threshold: float = 0.85
+    confidence_threshold: float = 0.90
     aggregation_strategy: str = "simple"
     enable_regex: bool = True
     regex_detector: RegexDetector = field(default_factory=RegexDetector)

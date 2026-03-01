@@ -1,17 +1,17 @@
 """
 Deterministic regex-based PII detector for structured entity types.
 
-Handles SSN detection in both dashed (XXX-XX-XXXX) and dashless (XXXXXXXXX)
-formats. Dashless detection uses context-aware scoring: surrounding words
-are checked for trigger terms ("ssn", "social security", "tax id") and
-negative terms ("phone", "order", "serial") to disambiguate 9-digit SSNs
-from phone numbers, order IDs, and serial numbers.
+Handles detection of:
+  - SSN: dashed (XXX-XX-XXXX) and dashless (XXXXXXXXX) formats.
+    Dashless uses context-aware scoring to disambiguate from other 9-digit numbers.
+  - PHONE: US format (NNN) NNN-NNNN.
+  - EMAIL: standard user@domain.tld format.
+
+MRN detection is planned for a future iteration.
 
 Latency budget: entire regex pass must complete in <0.5ms. All patterns
 are pre-compiled at construction time; context scoring uses O(w) set
 intersection where w is the context window size.
-
-Designed for extension to PHONE, EMAIL, MRN patterns in future iterations.
 
 HIPAA/GDPR: No raw PII is logged. Only entity type and character offsets
 are recorded.
@@ -98,8 +98,8 @@ SSN_NEGATIVE_WORDS: frozenset[str] = frozenset(
 class RegexDetector:
     """Deterministic regex detector for structured PII patterns.
 
-    Currently supports SSN detection (dashed and dashless with context
-    disambiguation). Designed for extension to PHONE, EMAIL, MRN.
+    Supports SSN (dashed and dashless with context disambiguation),
+    PHONE (US parenthesized format), and EMAIL detection.
 
     Attributes:
         context_window: Number of words on each side of a match to
@@ -108,14 +108,22 @@ class RegexDetector:
             before context scoring.
         dashless_threshold: Minimum score to emit a dashless match as SSN.
         dashed_score: Fixed confidence for dashed SSN matches.
+        phone_score: Fixed confidence for phone matches.
+        email_score: Fixed confidence for email matches.
     """
 
     context_window: int = 10
     dashless_base_score: float = 0.40
     dashless_threshold: float = 0.70
     dashed_score: float = 0.99
+    phone_score: float = 0.95
+    email_score: float = 0.99
+    mrn_score: float = 0.99
     _ssn_dashed: re.Pattern[str] = field(init=False, repr=False)
     _ssn_dashless: re.Pattern[str] = field(init=False, repr=False)
+    _phone: re.Pattern[str] = field(init=False, repr=False)
+    _email: re.Pattern[str] = field(init=False, repr=False)
+    _mrn: re.Pattern[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compile regex patterns once at construction time."""
@@ -136,11 +144,32 @@ class RegexDetector:
         # a longer alphanumeric string.
         self._ssn_dashless = re.compile(r"(?<!\w)(\d{9})(?!\w)")
 
+        # US phone: (NNN) NNN-NNNN format. Optional space after closing
+        # paren. Lookahead prevents matching partial longer numbers.
+        self._phone = re.compile(
+            r"(?<!\w)" r"\(\d{3}\)" r"\s?" r"\d{3}-\d{4}" r"(?!\d)"
+        )
+
+        # Email: standard user@domain.tld format.
+        # Greedy domain match backtracks to leave TLD as [a-zA-Z]{2,}.
+        # Trailing sentence-end punctuation (e.g. "user@ex.com.") is excluded.
+        self._email = re.compile(
+            r"(?<!\w)" r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" r"(?![a-zA-Z])"
+        )
+
+        # MRN: Medical Record Number in MRN-XXXXXXX format.
+        # Case-insensitive prefix, 7-digit numeric suffix.
+        self._mrn = re.compile(
+            r"(?<!\w)" r"MRN-\d{7}" r"(?!\w)",
+            re.IGNORECASE,
+        )
+
     def detect(self, text: str) -> list[DetectedEntity]:
         """Run all regex patterns against input text.
 
-        For dashless SSN matches, applies context-aware scoring to
-        disambiguate from other 9-digit numbers.
+        Runs SSN (dashed + dashless with context scoring), PHONE, and
+        EMAIL patterns. All matches are returned as DetectedEntity with
+        source="regex".
 
         Args:
             text: Raw input text to scan.
@@ -152,6 +181,9 @@ class RegexDetector:
         dashed_spans = self._detect_ssn_dashed(text)
         entities.extend(dashed_spans)
         entities.extend(self._detect_ssn_dashless(text, dashed_spans))
+        entities.extend(self._detect_phone(text))
+        entities.extend(self._detect_email(text))
+        entities.extend(self._detect_mrn(text))
         return entities
 
     def _detect_ssn_dashed(self, text: str) -> list[DetectedEntity]:
@@ -231,6 +263,69 @@ class RegexDetector:
                         source="regex",
                     )
                 )
+        return results
+
+    def _detect_phone(self, text: str) -> list[DetectedEntity]:
+        """Detect US phone numbers in (NNN) NNN-NNNN format.
+
+        Parenthesized format is distinctive enough to assign a fixed
+        high confidence without context scoring.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._phone.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="PHONE",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.phone_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_email(self, text: str) -> list[DetectedEntity]:
+        """Detect email addresses in standard user@domain.tld format.
+
+        Email format is unambiguous — matches get a fixed high confidence.
+        Trailing sentence punctuation (e.g. "user@ex.com.") is excluded
+        by the regex backtracking on the TLD match.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._email.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="EMAIL",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.email_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_mrn(self, text: str) -> list[DetectedEntity]:
+        """Detect Medical Record Numbers in MRN-XXXXXXX format.
+
+        MRN format is highly distinctive and unambiguous.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._mrn.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="MRN",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.mrn_score,
+                    token="",
+                    source="regex",
+                )
+            )
         return results
 
     def _score_dashless_context(
