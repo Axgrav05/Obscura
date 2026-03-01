@@ -59,6 +59,44 @@ BERT_ENTITY_TYPES: set[str] = {"PER", "ORG", "LOC", "MISC"}
 # Entity types detectable by the full hybrid pipeline (BERT + regex SSN).
 HYBRID_ENTITY_TYPES: set[str] = BERT_ENTITY_TYPES | {"SSN"}
 
+# Label adapters for models with non-IOB2 label schemes.
+# Maps model-specific entity_group values to CoNLL-2003 equivalents.
+LABEL_ADAPTERS: dict[str, dict[str, str]] = {
+    "StanfordAIMI/stanford-deidentifier-base": {
+        "PATIENT": "PER",
+        "HCW": "PER",
+        "HOSPITAL": "ORG",
+        "VENDOR": "ORG",
+        "DATE": "MISC",
+        "ID": "MISC",
+        "PHONE": "MISC",
+    },
+}
+
+
+def _detect_label_adapter(
+    model_name: str, model_config: object
+) -> dict[str, str] | None:
+    """Auto-detect if a model needs a label adapter.
+
+    Checks LABEL_ADAPTERS by name first, then inspects id2label for
+    non-IOB2 labels (no B-/I- prefixes).
+    """
+    if model_name in LABEL_ADAPTERS:
+        return LABEL_ADAPTERS[model_name]
+
+    id2label = getattr(model_config, "id2label", {})
+    non_o_labels = [v for v in id2label.values() if v != "O"]
+    if non_o_labels and not any(
+        lab.startswith("B-") or lab.startswith("I-") for lab in non_o_labels
+    ):
+        # Non-IOB2 model without a known adapter — log warning
+        print(
+            f"  WARNING: {model_name} uses non-IOB2 labels {non_o_labels} "
+            f"with no adapter defined. Results may be inaccurate."
+        )
+    return None
+
 
 def _get_memory_mb() -> float:
     """Return current RSS (Resident Set Size) of this process in MB.
@@ -147,6 +185,7 @@ def filter_to_hybrid_tags(tags: list[str]) -> list[str]:
 def align_predictions_to_words(
     tokens: list[str],
     ner_pipeline: TokenClassificationPipeline,
+    label_adapter: dict[str, str] | None = None,
 ) -> list[str]:
     """
     Run the NER pipeline on a token list and align predictions back
@@ -159,6 +198,8 @@ def align_predictions_to_words(
     Args:
         tokens: Original whitespace-tokenized word list.
         ner_pipeline: Loaded HuggingFace NER pipeline.
+        label_adapter: Optional mapping from model-specific labels to
+            CoNLL-2003 equivalents (e.g. PATIENT -> PER).
 
     Returns:
         BIO tag list aligned to the input tokens.
@@ -166,13 +207,13 @@ def align_predictions_to_words(
     text = " ".join(tokens)
 
     # Build a mapping: for each token index, its (start, end) char offsets.
+    # Uses deterministic cumulative offsets from " ".join() rather than
+    # text.index() which can misalign on duplicate substrings.
     word_offsets: list[tuple[int, int]] = []
     pos = 0
     for token in tokens:
-        start = text.index(token, pos)
-        end = start + len(token)
-        word_offsets.append((start, end))
-        pos = end
+        word_offsets.append((pos, pos + len(token)))
+        pos += len(token) + 1  # +1 for space separator
 
     # Run NER inference.
     raw_entities = ner_pipeline(text)
@@ -185,14 +226,18 @@ def align_predictions_to_words(
         ent_end = int(ent["end"])
         ent_label = ent["entity_group"]
 
+        # Remap non-IOB2 labels if adapter is provided.
+        if label_adapter:
+            ent_label = label_adapter.get(ent_label, ent_label)
+
         # Find which word tokens overlap with this entity span.
+        first_tagged = False
         for idx, (ws, we) in enumerate(word_offsets):
-            # Check for overlap.
             if ws < ent_end and we > ent_start:
                 if pred_tags[idx] == "O":
-                    # Check if this is the start of the entity.
-                    if ws >= ent_start or idx == 0:
+                    if not first_tagged:
                         pred_tags[idx] = f"B-{ent_label}"
+                        first_tagged = True
                     else:
                         pred_tags[idx] = f"I-{ent_label}"
 
@@ -206,7 +251,8 @@ def align_hybrid_predictions_to_words(
     """Run the hybrid PIIEngine (BERT + regex) and align to word-level BIO tags.
 
     Unlike align_predictions_to_words (BERT-only), this uses PIIEngine.detect()
-    which includes regex detection and conflict resolution.
+    which includes regex detection and conflict resolution. The label adapter
+    is applied inside PIIEngine._detect_bert(), so no remapping needed here.
 
     Args:
         tokens: Original whitespace-tokenized word list.
@@ -217,14 +263,13 @@ def align_hybrid_predictions_to_words(
     """
     text = " ".join(tokens)
 
-    # Build word offset mapping (same logic as BERT-only version).
+    # Build word offset mapping — deterministic cumulative offsets from
+    # " ".join() rather than text.index() which misaligns on duplicates.
     word_offsets: list[tuple[int, int]] = []
     pos = 0
     for token in tokens:
-        start = text.index(token, pos)
-        end = start + len(token)
-        word_offsets.append((start, end))
-        pos = end
+        word_offsets.append((pos, pos + len(token)))
+        pos += len(token) + 1  # +1 for space separator
 
     # Run hybrid detection.
     entities = engine.detect(text)
@@ -242,11 +287,13 @@ def align_hybrid_predictions_to_words(
 
     for ent in entities:
         bio_label = entity_to_bio.get(ent.entity_type, ent.entity_type)
+        first_tagged = False
         for idx, (ws, we) in enumerate(word_offsets):
             if ws < ent.end and we > ent.start:
                 if pred_tags[idx] == "O":
-                    if ws >= ent.start or idx == 0:
+                    if not first_tagged:
                         pred_tags[idx] = f"B-{bio_label}"
+                        first_tagged = True
                     else:
                         pred_tags[idx] = f"I-{bio_label}"
 
@@ -277,7 +324,7 @@ def run_evaluation(
     print(f"Loading model: {model_name} (mode={mode})")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForTokenClassification.from_pretrained(model_name)
-    ner_pipeline = pipeline(
+    ner_pipe = pipeline(
         "ner",
         model=model,
         tokenizer=tokenizer,
@@ -285,14 +332,23 @@ def run_evaluation(
         device=-1,  # CPU — matches production target
     )
 
+    # Auto-detect label adapter for non-IOB2 models (e.g. StanfordAIMI).
+    label_adapter = _detect_label_adapter(model_name, model.config)
+    if label_adapter:
+        print(f"  Label adapter active: {label_adapter}")
+
     # For hybrid mode, wrap the pipeline in a PIIEngine with regex enabled.
     engine = None
     if mode == "hybrid":
         from ml.pii_engine import PIIEngine
 
-        engine = PIIEngine(model_id=model_name, enable_regex=True)
+        engine = PIIEngine(
+            model_id=model_name,
+            enable_regex=True,
+            label_adapter=label_adapter,
+        )
         # Reuse the already-loaded pipeline to avoid double-loading.
-        engine._pipeline = ner_pipeline
+        engine._pipeline = ner_pipe
 
     rss_after_load_mb = _get_memory_mb()
     model_rss_mb = rss_after_load_mb - rss_before_mb
@@ -300,7 +356,18 @@ def run_evaluation(
 
     print(f"Loading dataset: {dataset_path}")
     samples = load_dataset(dataset_path, limit=limit)
-    print(f"Evaluating {len(samples)} samples...\n")
+    print(f"Evaluating {len(samples)} samples...")
+
+    # Warmup: 5 untimed inferences to stabilize JIT and caches.
+    num_warmup = min(5, len(samples))
+    print(f"  Running {num_warmup} warmup inferences...")
+    for i in range(num_warmup):
+        warmup_tokens = samples[i]["tokens"]
+        if mode == "bert":
+            align_predictions_to_words(warmup_tokens, ner_pipe, label_adapter)
+        else:
+            align_hybrid_predictions_to_words(warmup_tokens, engine)
+    print()
 
     all_true_tags: list[list[str]] = []
     all_pred_tags: list[list[str]] = []
@@ -317,7 +384,7 @@ def run_evaluation(
         # Measure inference latency.
         start_ns = time.perf_counter_ns()
         if mode == "bert":
-            pred_tags = align_predictions_to_words(tokens, ner_pipeline)
+            pred_tags = align_predictions_to_words(tokens, ner_pipe, label_adapter)
         else:
             pred_tags = align_hybrid_predictions_to_words(tokens, engine)
         end_ns = time.perf_counter_ns()
