@@ -1,6 +1,10 @@
 # Obscura configuration (local/dev defaults)
 # NOTE: In production, most secrets should come from environment variables.
 
+[server]
+host = "0.0.0.0"
+port = 8080
+
 [app]
 # Environment name: dev | staging | prod
 env = "dev"
