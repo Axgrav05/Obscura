@@ -10,7 +10,7 @@
 
 | Team Member | Tasks Completed | Planned Tasks (Next Week) | Issues / Challenges | Time Spent |
 | :--- | :--- | :--- | :--- | :--- |
-| **Arjun** | | | | |
+| **Arjun** | - Deprioritized real-time feedback loop integration due to high operational overhead and privacy constraints. Focus shifted to categorization expansion and BYOM. | | | |
 | **Bigan** | | | | |
 | **Kyle** | | | | |
 | **Rainer** | | | | |
