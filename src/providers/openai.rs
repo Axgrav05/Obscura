@@ -46,7 +46,12 @@ impl ProviderAdapter for OpenAIAdapter {
             })
             .collect();
 
-        Some(user_messages.join("\n"))
+        let joined = user_messages.join("\n");
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
     }
 
     fn extract_response_text(&self, body: &str) -> Option<String> {
@@ -56,6 +61,26 @@ impl ProviderAdapter for OpenAIAdapter {
         let content_val = choices.first()?.get("message")?.get("content")?;
 
         extract_content_text(content_val)
+    }
+
+    fn extract_response_delta_text(&self, body: &str) -> Option<String> {
+        let json: Value = serde_json::from_str(body).ok()?;
+
+        // Responses API streaming event: {"type":"response.output_text.delta","delta":"..."}
+        if json.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta") {
+            return json
+                .get("delta")
+                .and_then(|d| d.as_str())
+                .map(|s| s.to_string());
+        }
+
+        // Chat Completions streaming chunk: {"choices":[{"delta":{"content":"..."}}]}
+        json.get("choices")?
+            .get(0)?
+            .get("delta")?
+            .get("content")?
+            .as_str()
+            .map(|s| s.to_string())
     }
 }
 
@@ -223,5 +248,29 @@ mod tests {
 
         assert_eq!(req_text.as_deref(), Some("My name is Josef."));
         assert_eq!(resp_text.as_deref(), Some("Nice to meet you, Josef."));
+    }
+
+    #[test]
+    fn extract_response_delta_text_responses_api() {
+        let adapter = OpenAIAdapter;
+
+        let sample = r#"
+        { "type": "response.output_text.delta", "delta": "Hello" }
+        "#;
+
+        let result = adapter.extract_response_delta_text(sample);
+        assert_eq!(result.as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn extract_response_delta_text_chat_completions() {
+        let adapter = OpenAIAdapter;
+
+        let sample = r#"
+        { "choices": [ { "delta": { "content": "Hi" } } ] }
+        "#;
+
+        let result = adapter.extract_response_delta_text(sample);
+        assert_eq!(result.as_deref(), Some("Hi"));
     }
 }
