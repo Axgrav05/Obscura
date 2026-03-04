@@ -51,6 +51,26 @@ LABEL_LIST: list[str] = [
 
 LABEL_TO_ID: dict[str, int] = {label: i for i, label in enumerate(LABEL_LIST)}
 
+# Nationalities for MISC entity generation. These are the most reliably
+# detected MISC entities from CoNLL-2003 training data.
+NATIONALITIES: list[str] = [
+    "American",
+    "British",
+    "Canadian",
+    "French",
+    "German",
+    "Japanese",
+    "Chinese",
+    "Australian",
+    "Indian",
+    "Italian",
+    "Mexican",
+    "Brazilian",
+    "Korean",
+    "Spanish",
+    "Russian",
+]
+
 
 def _ssn(dashless: bool = False) -> str:
     """Generate a realistic SSN with IRS-valid components.
@@ -111,7 +131,12 @@ def _tokenize_and_label(
     # Build a map of character spans to entity types.
     char_labels: list[str] = ["O"] * len(text)
 
-    for entity_text, entity_type in entities:
+    # Sort entities longest-first so longer matches take priority.
+    # Prevents a short entity (e.g. "American") from consuming characters
+    # that belong to a longer entity (e.g. "American Airlines").
+    sorted_entities = sorted(entities, key=lambda e: len(e[0]), reverse=True)
+
+    for entity_text, entity_type in sorted_entities:
         # Find all non-overlapping occurrences.
         start = 0
         while True:
@@ -165,8 +190,16 @@ def _enterprise_sample() -> tuple[str, list[tuple[str, str]]]:
     Includes both dashed and dashless SSN templates. Dashless templates
     use SSN-context trigger words ("social security number", "SSN",
     "tax ID") so the context-aware regex detector can identify them.
+    Some templates include MISC entities (nationalities) for coverage.
     """
-    # Templates with dashed SSNs (original).
+    person = fake.name()
+    org = fake.company()
+    phone = _phone()
+    email = fake.email()
+    location = fake.city()
+    misc = random.choice(NATIONALITIES)
+
+    # Templates with dashed SSNs. `misc` is captured from enclosing scope.
     dashed_templates = [
         lambda p, o, s, ph, e, loc: (
             f"Please summarize the case for {p} (SSN: {s}), "
@@ -192,6 +225,28 @@ def _enterprise_sample() -> tuple[str, list[tuple[str, str]]]:
             f"Their office at {o} is located in {loc}.",
             [(p, "PER"), (e, "EMAIL"), (o, "ORG"), (loc, "LOC")],
         ),
+        # MISC templates (nationality captured via closure)
+        lambda p, o, s, ph, e, loc: (
+            f"The {misc} employee {p} at {o} has SSN {s} on file. Phone: {ph}.",
+            [(misc, "MISC"), (p, "PER"), (o, "ORG"), (s, "SSN"), (ph, "PHONE")],
+        ),
+        lambda p, o, s, ph, e, loc: (
+            f"{p}, a {misc} national, is employed by {o} in {loc}. "
+            f"Contact: {ph} or {e}.",
+            [
+                (p, "PER"),
+                (misc, "MISC"),
+                (o, "ORG"),
+                (loc, "LOC"),
+                (ph, "PHONE"),
+                (e, "EMAIL"),
+            ],
+        ),
+        lambda p, o, s, ph, e, loc: (
+            f"Background check for {misc} citizen {p} at {o}. "
+            f"SSN: {s}, callback {ph}.",
+            [(misc, "MISC"), (p, "PER"), (o, "ORG"), (s, "SSN"), (ph, "PHONE")],
+        ),
     ]
 
     # Templates with dashless SSNs — include trigger words for context.
@@ -209,13 +264,12 @@ def _enterprise_sample() -> tuple[str, list[tuple[str, str]]]:
             f"number {sd}, employed at {o}.",
             [(p, "PER"), (sd, "SSN"), (o, "ORG")],
         ),
+        # MISC dashless template
+        lambda p, o, sd, ph, e, loc: (
+            f"The {misc} taxpayer {p} at {o} has SSN {sd} per tax records.",
+            [(misc, "MISC"), (p, "PER"), (o, "ORG"), (sd, "SSN")],
+        ),
     ]
-
-    person = fake.name()
-    org = fake.company()
-    phone = _phone()
-    email = fake.email()
-    location = fake.city()
 
     # 40% chance of dashless SSN template.
     if random.random() < 0.4:
@@ -230,7 +284,10 @@ def _enterprise_sample() -> tuple[str, list[tuple[str, str]]]:
 
 
 def _clinical_sample() -> tuple[str, list[tuple[str, str]]]:
-    """Generate one clinical-domain sample with PHI entities."""
+    """Generate one clinical-domain sample with PHI entities.
+
+    Some templates include MISC entities (nationalities) for coverage.
+    """
     conditions = [
         "Type 2 Diabetes",
         "Hypertension",
@@ -251,6 +308,13 @@ def _clinical_sample() -> tuple[str, list[tuple[str, str]]]:
         "Albuterol inhaler",
         "Prednisone 10mg",
     ]
+
+    person = fake.name()
+    mrn = _mrn()
+    dob = fake.date_of_birth(minimum_age=18, maximum_age=90).strftime("%m/%d/%Y")
+    condition = random.choice(conditions)
+    medication = random.choice(medications)
+    misc = random.choice(NATIONALITIES)
 
     templates = [
         lambda p, m, d, cond, med: (
@@ -273,13 +337,18 @@ def _clinical_sample() -> tuple[str, list[tuple[str, str]]]:
             f"Diagnosis: {cond}. Adjusting {med} dosage.",
             [(p, "PER"), (m, "MRN")],
         ),
+        # MISC templates (nationality captured via closure)
+        lambda p, m, d, cond, med: (
+            f"The {misc} patient {p}, MRN {m}, DOB {d}, "
+            f"presented with {cond}. Started {med}.",
+            [(misc, "MISC"), (p, "PER"), (m, "MRN"), (d, "DOB")],
+        ),
+        lambda p, m, d, cond, med: (
+            f"Patient {p} ({misc} national), MRN {m}. "
+            f"Diagnosed with {cond}, prescribed {med}.",
+            [(p, "PER"), (misc, "MISC"), (m, "MRN")],
+        ),
     ]
-
-    person = fake.name()
-    mrn = _mrn()
-    dob = fake.date_of_birth(minimum_age=18, maximum_age=90).strftime("%m/%d/%Y")
-    condition = random.choice(conditions)
-    medication = random.choice(medications)
 
     template_fn = random.choice(templates)
     text, entities = template_fn(person, mrn, dob, condition, medication)

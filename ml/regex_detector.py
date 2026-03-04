@@ -145,16 +145,19 @@ class RegexDetector:
         self._ssn_dashless = re.compile(r"(?<!\w)(\d{9})(?!\w)")
 
         # US phone: (NNN) NNN-NNNN format. Optional space after closing
-        # paren. Lookahead prevents matching partial longer numbers.
+        # paren. Word-char lookahead rejects alpha-adjacent matches
+        # like "(123) 456-7890ABC".
         self._phone = re.compile(
-            r"(?<!\w)" r"\(\d{3}\)" r"\s?" r"\d{3}-\d{4}" r"(?!\d)"
+            r"(?<!\w)" r"\(\d{3}\)" r"\s?" r"\d{3}-\d{4}" r"(?!\w)"
         )
 
         # Email: standard user@domain.tld format.
         # Greedy domain match backtracks to leave TLD as [a-zA-Z]{2,}.
-        # Trailing sentence-end punctuation (e.g. "user@ex.com.") is excluded.
+        # Word-char lookahead rejects partial matches like
+        # "user@ex.com123" while still excluding trailing sentence
+        # punctuation (e.g. "user@ex.com.").
         self._email = re.compile(
-            r"(?<!\w)" r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" r"(?![a-zA-Z])"
+            r"(?<!\w)" r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" r"(?!\w)"
         )
 
         # MRN: Medical Record Number in MRN-XXXXXXX format.
