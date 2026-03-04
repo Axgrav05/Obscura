@@ -1,7 +1,14 @@
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use prometheus::{Encoder, TextEncoder};
+use once_cell::sync::Lazy;
+use prometheus::{Encoder, IntCounter, TextEncoder};
 use std::convert::Infallible;
+
+static HTTP_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
+    let counter = IntCounter::new("http_requests_total", "Total HTTP requests").unwrap();
+    prometheus::register(Box::new(counter.clone())).unwrap();
+    counter
+});
 
 fn metrics_response() -> Response<Body> {
     let encoder = TextEncoder::new();
@@ -23,6 +30,7 @@ fn metrics_response() -> Response<Body> {
 }
 
 async fn router(req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    HTTP_REQUESTS.inc();
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") => Ok(metrics_response()),
         _ => Ok(Response::builder()
