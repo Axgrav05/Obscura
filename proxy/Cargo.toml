@@ -1,0 +1,16 @@
+[package]
+name = "proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+config = { path = "../config" }
+inference = { path = "../inference" }
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+bytes = { workspace = true }
