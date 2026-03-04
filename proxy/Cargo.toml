@@ -14,3 +14,4 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 bytes = { workspace = true }
+reqwest = { version = "0.13.2", features = ["stream", "json"] }
