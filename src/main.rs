@@ -4,6 +4,9 @@ use once_cell::sync::Lazy;
 use prometheus::{Encoder, IntCounter, TextEncoder};
 use std::convert::Infallible;
 
+pub mod providers;
+
+
 static HTTP_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
     let counter = IntCounter::new("http_requests_total", "Total HTTP requests").unwrap();
     prometheus::register(Box::new(counter.clone())).unwrap();
@@ -28,6 +31,7 @@ fn metrics_response() -> Response<Body> {
         .body(Body::from(buffer))
         .unwrap()
 }
+
 
 async fn router(req: Request<Body>) -> Result<Response<Body>, Infallible> {
     HTTP_REQUESTS.inc();
