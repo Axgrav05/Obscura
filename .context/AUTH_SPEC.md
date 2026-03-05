@@ -1,6 +1,6 @@
 # Obscura Authentication Flow Specification
-**File:** `.context/AUTH_SPEC.md`  
-**Status:** Final (v1)  
+
+**Status:** (v1)  
 **Last Updated:** 2026-03-04  
 **Owner:** Obscura Proxy Team  
 **Applies To:** Rust proxy (`/src`) deployed as a Kubernetes sidecar
