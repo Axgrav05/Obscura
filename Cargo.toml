@@ -6,7 +6,8 @@ members = [
 ]
 resolver = "2"
 
-# Centralized dependencies for workspace-wide consistency
-[workspace.dependencies]
+[dependencies]
 tokio = { version = "1.37", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+

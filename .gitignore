@@ -46,3 +46,10 @@ ml/results/
 # Logs
 # ===============================
 *.log
+
+# ===============================
+# AI Assistant Artifacts
+# ===============================
+.claude/
+[cC][lL][aA][uU][dD][eE].md
+.context/
