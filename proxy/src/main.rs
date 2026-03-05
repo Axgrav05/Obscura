@@ -1,3 +1,4 @@
+use config::Config;
 use core::convert::Infallible;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -5,10 +6,9 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use inference::ModelEnvironment;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use config::Config;
-use inference::ModelEnvironment;
 
 async fn handle_request(
     req: Request<hyper::body::Incoming>,

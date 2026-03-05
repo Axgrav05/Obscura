@@ -14,10 +14,16 @@ impl ModelEnvironment {
             .map_err(|_| anyhow::anyhow!("NER_TOKENIZER_PATH environment variable is missing"))?;
 
         if !std::path::Path::new(&model_path).exists() {
-            anyhow::bail!("NER_MODEL_PATH points to non-existent file/directory: {}", model_path);
+            anyhow::bail!(
+                "NER_MODEL_PATH points to non-existent file/directory: {}",
+                model_path
+            );
         }
         if !std::path::Path::new(&tokenizer_path).exists() {
-            anyhow::bail!("NER_TOKENIZER_PATH points to non-existent file/directory: {}", tokenizer_path);
+            anyhow::bail!(
+                "NER_TOKENIZER_PATH points to non-existent file/directory: {}",
+                tokenizer_path
+            );
         }
 
         Ok(Self {

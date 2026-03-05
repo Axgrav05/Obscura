@@ -15,7 +15,10 @@ fn test_model_env_missing_fails() {
         std::env::remove_var("NER_MODEL_PATH");
         std::env::remove_var("NER_TOKENIZER_PATH");
     }
-    
+
     let res = ModelEnvironment::load();
-    assert!(res.is_err(), "ModelEnvironment should fail to load without env vars");
+    assert!(
+        res.is_err(),
+        "ModelEnvironment should fail to load without env vars"
+    );
 }
