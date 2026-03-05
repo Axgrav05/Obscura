@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 from datasets import Dataset
-from seqeval.metrics import classification_report, f1_score
+from seqeval.metrics import f1_score
 from transformers import (
     AutoModelForTokenClassification,
     AutoTokenizer,
