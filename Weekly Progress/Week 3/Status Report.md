@@ -8,14 +8,14 @@
 
 ## Individual Status Updates
 
-| Team Member | Tasks Completed | Planned Tasks (Next Week) | Issues / Challenges | Time Spent |
-| :--- | :--- | :--- | :--- | :--- |
-| **Arjun** | | | | |
-| **Bigan** | | | | |
-| **Kyle** | | | | |
-| **Rainer** | | | | |
-| **Eduardo** | | | | |
-| **Billy** | | | | |
+| Team Member | Tasks Completed                                                                        | Planned Tasks (Next Week)                                                                                           | Issues / Challenges                                 | Time Spent |
+|:------------|:---------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------------------------------------|:----------------------------------------------------| :--- |
+| **Arjun**   |                                                                                        |                                                                                                                     |                                                     | |
+| **Bigan**   |                                                                                        |                                                                                                                     |                                                     | |
+| **Kyle**    |                                                                                        |                                                                                                                     |                                                     | |
+| **Rainer**  |                                                                                        |                                                                                                                     |                                                     | |
+| **Eduardo** | -Implemented Prometheus `/metrics` endpoint and `http_requests_total` counter (OBS-11) | -Install k6, run baseline load tests on EC2 proxy, measure req/s and latency, document results with graphs (OBS-17) | -Initial git push (HTTP 500) and authorization issues | 7 hrs |
+| **Billy**   |                                                                                        |                                                                                                                     |                                                     | |
 
 **Total Team Time Spent:** 
 
