@@ -6,9 +6,9 @@ edition = "2024"
 [dependencies]
 config = { path = "../config" }
 inference = { path = "../inference" }
-tokio = { version = "1", features = ["full"] }
-hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
+tokio = {workspace = true}
+hyper = {workspace = true}
+hyper-util = {workspace = true}
 http-body-util = "0.1"
 anyhow = "1.0"
 tracing = "0.1"
