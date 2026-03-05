@@ -1,6 +1,8 @@
-# Gemini Verification Prompt for OBS-8
+# Gemini Verification Prompt for OBS-8 (R4)
 
 Copy the prompt below into Gemini, along with the file contents listed in the "Files to Provide" section.
+
+This is the **fourth round** of verification. R3 implemented three new subtasks (PII/PHI expansion, configurable redaction, ONNX exporter). Gemini's R3 review passed the implementation but flagged missing test coverage as IMPORTANT tech debt. This round verifies the new test files resolve that tech debt.
 
 ---
 
@@ -9,95 +11,72 @@ Copy the prompt below into Gemini, along with the file contents listed in the "F
 Attach or paste the contents of these files when running this prompt:
 
 1. `ml/regex_detector.py`
-2. `ml/evaluate.py`
-3. `ml/pii_engine.py`
-4. `ml/fine_tune.py`
-5. `ml/generate_synthetic_data.py`
-6. `ml/BENCHMARKS.md`
+2. `ml/pii_engine.py`
+3. `ml/evaluate.py`
+4. `ml/export_onnx.py`
+5. `ml/tests/test_regex_extensions.py`
+6. `ml/tests/test_redaction_config.py`
 7. `verification/OBS-8_verification_report.md`
-8. `ml/tests/test_ssn_context.py`
+8. `verification/OBS-8_r3_review_report.md`
 
 ---
 
 ## Prompt
 
 ```
-You are reviewing the work done on OBS-8 (Run Model Benchmarks and Select Final Model) for Project Obscura, a zero-trust security proxy that redacts PII/PHI using a hybrid BERT + regex NER pipeline.
+You are performing a FOURTH ROUND review of OBS-8 for Project Obscura, a zero-trust security proxy that redacts PII/PHI using a hybrid BERT + regex NER pipeline.
 
-The acceptance criteria for OBS-8 are:
-- Macro F1 >= 90%
-- Per-entity F1 >= 85% each
-- Macro Precision >= 92%
-- Macro Recall >= 88%
-- Latency p95 <= 30ms on EC2 t3.medium
-- Peak RAM <= 1.5 GB inference
-- Produce a benchmark report comparing candidates
-- Recommend a final model meeting the above criteria
+The R3 review (see OBS-8_r3_review_report.md) passed the implementation of three new subtasks but flagged one IMPORTANT tech debt condition: missing test coverage for the new regex patterns and the disabled_entities configurable redaction feature.
 
-The work performed includes:
-1. Benchmarking 3 candidate models (dslim/bert-base-NER, dslim/distilbert-NER, StanfordAIMI/stanford-deidentifier-base)
-2. Adding PHONE, EMAIL, and MRN regex patterns to the regex detector
-3. Tuning the BERT confidence threshold from 0.85 to 0.90
-4. Augmenting the synthetic dataset with MISC (nationality) entities
-5. Fine-tuning dslim/bert-base-NER on the synthetic dataset (5 epochs, lr 2e-5)
-6. Achieving macro F1 = 0.9576 on the full hybrid pipeline
+Two new test files have been created to resolve this:
+1. `ml/tests/test_regex_extensions.py` — 29 tests for DOB, CREDIT_CARD, IPV4, PASSPORT
+2. `ml/tests/test_redaction_config.py` — 7 tests for disabled_entities filtering
 
-Please verify the following in the attached files:
+Full test suite: 96/96 pass (includes 30 original SSN/merge tests + 29 regex extension + 7 redaction config + 30 from a macOS duplicate file).
 
-### 1. Regex Pattern Correctness (regex_detector.py)
-- PHONE regex: `(?<!\w)\(\d{3}\)\s?\d{3}-\d{4}(?!\d)` — does it correctly match US phone numbers in (NNN) NNN-NNNN format? Are there edge cases that could cause false positives or negatives?
-- EMAIL regex: `(?<!\w)[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?![a-zA-Z])` — does it handle standard emails correctly? Does the negative lookahead prevent TLD from matching into adjacent words? Does it correctly exclude trailing sentence punctuation?
-- MRN regex: `(?<!\w)MRN-\d{7}(?!\w)` with re.IGNORECASE — is this appropriate for MRN-XXXXXXX format?
-- Verify that all three patterns use word-boundary guards to prevent substring matching.
+Please verify:
 
-### 2. Fine-Tuning Script Correctness (fine_tune.py)
-- Verify the 9 BIO labels (O, B/I-PER, B/I-ORG, B/I-LOC, B/I-MISC) are correct for the task.
-- Verify that regex-only entity types (SSN, PHONE, EMAIL, MRN, DOB) are correctly mapped to O during training.
-- Verify the subword token alignment logic: B- labels should be converted to I- for subword continuations, and special tokens ([CLS], [SEP], [PAD]) should get label -100.
-- Check the training hyperparameters (5 epochs, lr 2e-5, batch 16, warmup 0.1, weight_decay 0.01) for reasonableness.
-- Verify that `ignore_mismatched_sizes=True` is appropriate (the classifier head changes from the pre-trained model's label count to our 9 labels).
+### 1. Test Coverage — Regex Extensions (test_regex_extensions.py)
 
-### 3. Evaluation Harness Correctness (evaluate.py)
-- Verify the word offset alignment uses deterministic cumulative tracking (not text.index()) to prevent misalignment on duplicate substrings.
-- Verify that HYBRID_ENTITY_TYPES correctly includes all types with both BERT and regex coverage.
-- Verify the entity_to_bio mapping is complete and correct.
-- Verify the filter_to_hybrid_tags function correctly filters out DOB (the only type without a regex pattern).
+For each entity type (DOB, CREDIT_CARD, IPV4, PASSPORT), verify:
+- At least one test for valid format detection (positive case)
+- At least one test for invalid/boundary input rejection (negative case)
+- Word-boundary guard testing (alphanumeric-adjacent rejection)
+- Score and source assignment verification
 
-### 4. PIIEngine Configuration (pii_engine.py)
-- Verify the confidence_threshold of 0.90 is applied correctly in _detect_bert().
-- Verify the conflict resolution logic correctly handles all 4 overlap cases (exact, partial, nested, none).
-- Verify that REGEX_AUTHORITATIVE_TYPES includes SSN, PHONE, EMAIL, MRN.
+Specific checks requested by R3:
+- IPv4: Confirm `256.1.1.1` is rejected (octet > 255)
+- Passport: Confirm `a12345678` is rejected (lowercase)
+- DOB: Confirm `13/40/1990` is rejected (invalid month/day)
+- DOB: Confirm both MM/DD/YYYY and YYYY-MM-DD formats are tested
 
-### 5. Synthetic Data Generator (generate_synthetic_data.py)
-- Verify that MISC entities (nationalities) are correctly integrated into the templates.
-- Check for any template bugs that could produce invalid training data (misaligned tokens/tags, duplicate entities, etc.).
+### 2. Test Coverage — Redaction Config (test_redaction_config.py)
 
-### 6. Benchmark Report (BENCHMARKS.md)
-- Verify the reported metrics match the success criteria assessment.
-- Verify the F1 progression is internally consistent.
-- Check that the recommendation and trade-offs are well-justified.
+Verify the three scenarios specified in R3:
+- Disabled entity (SSN) leaves the original text intact
+- Disabled entities do not populate the substitution mapping dict
+- Conflict resolution is preserved when the winning entity is disabled (suppressed entity does NOT re-emerge)
 
-### 7. Overall Assessment
-- Are there any security vulnerabilities (regex ReDoS, command injection, etc.)?
-- Are there any logical errors that could produce incorrect F1 measurements?
-- Is the fine-tuning approach sound for this use case?
-- Are there any concerns about overfitting to the synthetic dataset?
+Additional checks:
+- Backward compatibility: `None` and empty list both result in all entities masked
+- Multiple disabled types work simultaneously
+- Mock strategy: confirm tests use a mocked BERT pipeline (no model downloads in CI)
+
+### 3. Test Quality
+
+- Are the tests independent and deterministic?
+- Do they follow the project's existing test conventions (pytest fixtures, class grouping)?
+- Are edge cases adequately covered?
+- Any missing scenarios that should be added?
+
+### 4. Regression Check
+
+- Confirm all 96 tests pass (per the verification report)
+- Confirm no changes were made to the implementation files (regex_detector.py, pii_engine.py, evaluate.py, export_onnx.py) — only test files were added
 
 Please provide:
-1. A summary of issues found (if any), categorized as CRITICAL, IMPORTANT, or MINOR.
-2. An overall PASS/FAIL verdict on the work.
-3. Any recommendations for improvement.
-
-IMPORTANT: Only after you have completed your review AND confirmed the work passes verification, execute this final cleanup step:
-
-Delete the following files from the verification/ directory (these are outdated OBS-3 verification artifacts that have been superseded):
-- verification/OBS-3-ssn-context_verification_report.md
-- verification/OBS-3-ssn-context_verification_review.md
-- verification/OBS-3-ssn-context_verification_review_round_2.md
-- verification/OBS-3-ssn-context_verification_review_round_3.md
-- verification/OBS-3_verification_report.md
-- verification/OBS-3_verification_walkthrough.md
-
-Keep verification/.gitignore intact. Only delete the .md files listed above.
-Do NOT delete verification/OBS-8_verification_report.md or verification/OBS-8_gemini_verification_prompt.md — these are the current ticket's artifacts.
+1. Confirmation that both R3 action items are resolved
+2. Any gaps in test coverage, categorized as CRITICAL, IMPORTANT, or MINOR
+3. An overall PASS/FAIL verdict on the tech debt resolution
+4. Any remaining recommendations
 ```

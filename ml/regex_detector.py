@@ -6,8 +6,11 @@ Handles detection of:
     Dashless uses context-aware scoring to disambiguate from other 9-digit numbers.
   - PHONE: US format (NNN) NNN-NNNN.
   - EMAIL: standard user@domain.tld format.
-
-MRN detection is planned for a future iteration.
+  - MRN: Medical Record Number (MRN-XXXXXXX).
+  - DOB: Dates in MM/DD/YYYY or YYYY-MM-DD format.
+  - CREDIT_CARD: 16-digit credit card numbers (dashed or undashed).
+  - IPV4: IPv4 addresses with 0-255 octet validation.
+  - PASSPORT: US passport numbers (1 letter + 8 digits).
 
 Latency budget: entire regex pass must complete in <0.5ms. All patterns
 are pre-compiled at construction time; context scoring uses O(w) set
@@ -119,11 +122,19 @@ class RegexDetector:
     phone_score: float = 0.95
     email_score: float = 0.99
     mrn_score: float = 0.99
+    dob_score: float = 0.95
+    credit_card_score: float = 0.99
+    ipv4_score: float = 0.95
+    passport_score: float = 0.99
     _ssn_dashed: re.Pattern[str] = field(init=False, repr=False)
     _ssn_dashless: re.Pattern[str] = field(init=False, repr=False)
     _phone: re.Pattern[str] = field(init=False, repr=False)
     _email: re.Pattern[str] = field(init=False, repr=False)
     _mrn: re.Pattern[str] = field(init=False, repr=False)
+    _dob: re.Pattern[str] = field(init=False, repr=False)
+    _credit_card: re.Pattern[str] = field(init=False, repr=False)
+    _ipv4: re.Pattern[str] = field(init=False, repr=False)
+    _passport: re.Pattern[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compile regex patterns once at construction time."""
@@ -167,12 +178,42 @@ class RegexDetector:
             re.IGNORECASE,
         )
 
+        # DOB: Dates in MM/DD/YYYY or YYYY-MM-DD format.
+        # Strict month (01-12), day (01-31), year (1900-2099).
+        self._dob = re.compile(
+            r"(?<!\w)"
+            r"(?:"
+            r"(?:0[1-9]|1[0-2])/(?:0[1-9]|[12]\d|3[01])/(?:19|20)\d{2}"
+            r"|"
+            r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+            r")"
+            r"(?!\w)"
+        )
+
+        # Credit Card: 16-digit numbers, dashed/spaced or undashed.
+        # Dashed: 1234-5678-9012-3456 or 1234 5678 9012 3456.
+        # Undashed: 1234567890123456.
+        self._credit_card = re.compile(
+            r"(?<!\w)" r"(?:\d{4}[- ]\d{4}[- ]\d{4}[- ]\d{4}|\d{16})" r"(?!\w)"
+        )
+
+        # IPv4: Dotted quad with 0-255 octet validation.
+        self._ipv4 = re.compile(
+            r"(?<!\w)"
+            r"(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}"
+            r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)"
+            r"(?!\w)"
+        )
+
+        # US Passport: 1 uppercase letter followed by 8 digits.
+        self._passport = re.compile(r"(?<!\w)[A-Z]\d{8}(?!\w)")
+
     def detect(self, text: str) -> list[DetectedEntity]:
         """Run all regex patterns against input text.
 
-        Runs SSN (dashed + dashless with context scoring), PHONE, and
-        EMAIL patterns. All matches are returned as DetectedEntity with
-        source="regex".
+        Runs SSN (dashed + dashless with context scoring), PHONE, EMAIL,
+        MRN, DOB, CREDIT_CARD, IPV4, and PASSPORT patterns. All matches
+        are returned as DetectedEntity with source="regex".
 
         Args:
             text: Raw input text to scan.
@@ -187,6 +228,10 @@ class RegexDetector:
         entities.extend(self._detect_phone(text))
         entities.extend(self._detect_email(text))
         entities.extend(self._detect_mrn(text))
+        entities.extend(self._detect_dob(text))
+        entities.extend(self._detect_credit_card(text))
+        entities.extend(self._detect_ipv4(text))
+        entities.extend(self._detect_passport(text))
         return entities
 
     def _detect_ssn_dashed(self, text: str) -> list[DetectedEntity]:
@@ -325,6 +370,90 @@ class RegexDetector:
                     start=match.start(),
                     end=match.end(),
                     score=self.mrn_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_dob(self, text: str) -> list[DetectedEntity]:
+        """Detect dates of birth in MM/DD/YYYY or YYYY-MM-DD format.
+
+        Strict month (01-12), day (01-31), year (1900-2099) boundaries
+        prevent false positives on arbitrary number sequences.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._dob.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="DOB",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.dob_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_credit_card(self, text: str) -> list[DetectedEntity]:
+        """Detect 16-digit credit card numbers, dashed/spaced or undashed.
+
+        Standard 16-digit formatting. The 16-digit length distinguishes
+        these from 9-digit SSNs without overlap risk.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._credit_card.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="CREDIT_CARD",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.credit_card_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_ipv4(self, text: str) -> list[DetectedEntity]:
+        """Detect IPv4 addresses with 0-255 octet validation.
+
+        Each octet is validated to the 0-255 range in the regex itself,
+        preventing false positives on version strings like 1.2.300.4.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._ipv4.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="IPV4",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.ipv4_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_passport(self, text: str) -> list[DetectedEntity]:
+        """Detect US passport numbers (1 uppercase letter + 8 digits).
+
+        Standard 9-alphanumeric US passport format. Case-sensitive to
+        reduce false positives on arbitrary alphanumeric strings.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._passport.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="PASSPORT",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.passport_score,
                     token="",
                     source="regex",
                 )

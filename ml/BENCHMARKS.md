@@ -210,8 +210,8 @@ Fine-tuned `dslim/bert-base-NER` on 400 synthetic training samples (5 epochs, lr
 | **Macro F1** | **0.9576** | >= 0.90 | PASS |
 | Macro Precision | 1.0000 | >= 0.92 | PASS |
 | Macro Recall | 0.9360 | >= 0.88 | PASS |
-| RSS Peak | 853.5 MB | <= 1.5 GB | PASS |
-| Latency p95 | 35.5 ms | <= 30 ms (EC2) | macOS only* |
+| RSS Peak | 802.0 MB | <= 1.5 GB | PASS |
+| Latency p95 | 40.4 ms | <= 30 ms (EC2) | macOS only* |
 
 *Latency to be validated on EC2 after ONNX export (OBS-7).
 

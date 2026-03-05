@@ -57,7 +57,16 @@ from transformers import (
 BERT_ENTITY_TYPES: set[str] = {"PER", "ORG", "LOC", "MISC"}
 
 # Entity types detectable by the full hybrid pipeline (BERT + regex).
-HYBRID_ENTITY_TYPES: set[str] = BERT_ENTITY_TYPES | {"SSN", "PHONE", "EMAIL", "MRN"}
+HYBRID_ENTITY_TYPES: set[str] = BERT_ENTITY_TYPES | {
+    "SSN",
+    "PHONE",
+    "EMAIL",
+    "MRN",
+    "DOB",
+    "CREDIT_CARD",
+    "IPV4",
+    "PASSPORT",
+}
 
 # Label adapters for models with non-IOB2 label schemes.
 # Maps model-specific entity_group values to CoNLL-2003 equivalents.
@@ -284,6 +293,10 @@ def align_hybrid_predictions_to_words(
         "PHONE": "PHONE",
         "EMAIL": "EMAIL",
         "MRN": "MRN",
+        "DOB": "DOB",
+        "CREDIT_CARD": "CREDIT_CARD",
+        "IPV4": "IPV4",
+        "PASSPORT": "PASSPORT",
     }
 
     pred_tags = ["O"] * len(tokens)
@@ -434,8 +447,8 @@ def run_evaluation(
         )
     else:
         note = (
-            "Hybrid evaluation (BERT + regex SSN/PHONE/EMAIL/MRN). DOB "
-            "ground truth tags filtered to O (regex pattern not yet added)."
+            "Hybrid evaluation (BERT + regex SSN/PHONE/EMAIL/MRN/DOB/"
+            "CREDIT_CARD/IPV4/PASSPORT). All structured types evaluated."
         )
 
     results = {
