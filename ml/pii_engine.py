@@ -43,7 +43,9 @@ NER_LABEL_TO_ENTITY: dict[str, str] = {
 MODEL_ID = "dslim/bert-base-NER"
 
 # Entity types where regex is authoritative (deterministic patterns).
-REGEX_AUTHORITATIVE_TYPES: frozenset[str] = frozenset({"SSN", "PHONE", "EMAIL", "MRN"})
+REGEX_AUTHORITATIVE_TYPES: frozenset[str] = frozenset(
+    {"SSN", "PHONE", "EMAIL", "MRN", "DOB", "CREDIT_CARD", "IPV4", "PASSPORT"}
+)
 
 # Entity types where the transformer is authoritative (semantic).
 BERT_AUTHORITATIVE_TYPES: frozenset[str] = frozenset(
@@ -177,10 +179,11 @@ class PIIEngine:
 
     model_id: str = MODEL_ID
     device: str = "cpu"
-    confidence_threshold: float = 0.85
+    confidence_threshold: float = 0.90
     aggregation_strategy: str = "simple"
     enable_regex: bool = True
     regex_detector: RegexDetector = field(default_factory=RegexDetector)
+    label_adapter: dict[str, str] | None = None
     _pipeline: TokenClassificationPipeline | None = field(
         default=None, init=False, repr=False
     )
@@ -248,8 +251,12 @@ class PIIEngine:
             if score < self.confidence_threshold:
                 continue
 
-            # Strip IOB2 prefix (B-PER -> PER, I-LOC -> LOC)
+            # Map model-specific labels to canonical types.
+            # IOB2 models: entity_group is PER, LOC, ORG, MISC.
+            # Non-IOB2 models (e.g. StanfordAIMI): remap via label_adapter.
             raw_label = ent["entity_group"]
+            if self.label_adapter:
+                raw_label = self.label_adapter.get(raw_label, raw_label)
             entity_type = NER_LABEL_TO_ENTITY.get(raw_label, raw_label)
 
             detected.append(
@@ -266,14 +273,28 @@ class PIIEngine:
 
         return detected
 
-    def redact(self, text: str) -> RedactionResult:
+    def redact(
+        self, text: str, disabled_entities: list[str] | None = None
+    ) -> RedactionResult:
         """Detect PII entities and replace with reversible tokens.
 
         Returns the masked text plus a mapping dictionary for restoration.
         The mapping dict is the bridge artifact consumed by the Rust backend
         to restore original values after proxied LLM processing.
+
+        Args:
+            text: Input text to redact.
+            disabled_entities: Optional list of entity type strings to skip
+                (e.g., ["PERSON", "LOCATION"]). Matching entities are left
+                intact and excluded from the mapping.
         """
         entities = self.detect(text)
+
+        # Filter out disabled entity types before masking.
+        if disabled_entities:
+            disabled = frozenset(disabled_entities)
+            entities = [e for e in entities if e.entity_type not in disabled]
+
         if not entities:
             return RedactionResult(
                 masked_text=text,

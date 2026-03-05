@@ -1,17 +1,20 @@
 """
 Deterministic regex-based PII detector for structured entity types.
 
-Handles SSN detection in both dashed (XXX-XX-XXXX) and dashless (XXXXXXXXX)
-formats. Dashless detection uses context-aware scoring: surrounding words
-are checked for trigger terms ("ssn", "social security", "tax id") and
-negative terms ("phone", "order", "serial") to disambiguate 9-digit SSNs
-from phone numbers, order IDs, and serial numbers.
+Handles detection of:
+  - SSN: dashed (XXX-XX-XXXX) and dashless (XXXXXXXXX) formats.
+    Dashless uses context-aware scoring to disambiguate from other 9-digit numbers.
+  - PHONE: US format (NNN) NNN-NNNN.
+  - EMAIL: standard user@domain.tld format.
+  - MRN: Medical Record Number (MRN-XXXXXXX).
+  - DOB: Dates in MM/DD/YYYY or YYYY-MM-DD format.
+  - CREDIT_CARD: 16-digit credit card numbers (dashed or undashed).
+  - IPV4: IPv4 addresses with 0-255 octet validation.
+  - PASSPORT: US passport numbers (1 letter + 8 digits).
 
 Latency budget: entire regex pass must complete in <0.5ms. All patterns
 are pre-compiled at construction time; context scoring uses O(w) set
 intersection where w is the context window size.
-
-Designed for extension to PHONE, EMAIL, MRN patterns in future iterations.
 
 HIPAA/GDPR: No raw PII is logged. Only entity type and character offsets
 are recorded.
@@ -98,8 +101,8 @@ SSN_NEGATIVE_WORDS: frozenset[str] = frozenset(
 class RegexDetector:
     """Deterministic regex detector for structured PII patterns.
 
-    Currently supports SSN detection (dashed and dashless with context
-    disambiguation). Designed for extension to PHONE, EMAIL, MRN.
+    Supports SSN (dashed and dashless with context disambiguation),
+    PHONE (US parenthesized format), and EMAIL detection.
 
     Attributes:
         context_window: Number of words on each side of a match to
@@ -108,14 +111,30 @@ class RegexDetector:
             before context scoring.
         dashless_threshold: Minimum score to emit a dashless match as SSN.
         dashed_score: Fixed confidence for dashed SSN matches.
+        phone_score: Fixed confidence for phone matches.
+        email_score: Fixed confidence for email matches.
     """
 
     context_window: int = 10
     dashless_base_score: float = 0.40
     dashless_threshold: float = 0.70
     dashed_score: float = 0.99
+    phone_score: float = 0.95
+    email_score: float = 0.99
+    mrn_score: float = 0.99
+    dob_score: float = 0.95
+    credit_card_score: float = 0.99
+    ipv4_score: float = 0.95
+    passport_score: float = 0.99
     _ssn_dashed: re.Pattern[str] = field(init=False, repr=False)
     _ssn_dashless: re.Pattern[str] = field(init=False, repr=False)
+    _phone: re.Pattern[str] = field(init=False, repr=False)
+    _email: re.Pattern[str] = field(init=False, repr=False)
+    _mrn: re.Pattern[str] = field(init=False, repr=False)
+    _dob: re.Pattern[str] = field(init=False, repr=False)
+    _credit_card: re.Pattern[str] = field(init=False, repr=False)
+    _ipv4: re.Pattern[str] = field(init=False, repr=False)
+    _passport: re.Pattern[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compile regex patterns once at construction time."""
@@ -136,11 +155,65 @@ class RegexDetector:
         # a longer alphanumeric string.
         self._ssn_dashless = re.compile(r"(?<!\w)(\d{9})(?!\w)")
 
+        # US phone: (NNN) NNN-NNNN format. Optional space after closing
+        # paren. Word-char lookahead rejects alpha-adjacent matches
+        # like "(123) 456-7890ABC".
+        self._phone = re.compile(
+            r"(?<!\w)" r"\(\d{3}\)" r"\s?" r"\d{3}-\d{4}" r"(?!\w)"
+        )
+
+        # Email: standard user@domain.tld format.
+        # Greedy domain match backtracks to leave TLD as [a-zA-Z]{2,}.
+        # Word-char lookahead rejects partial matches like
+        # "user@ex.com123" while still excluding trailing sentence
+        # punctuation (e.g. "user@ex.com.").
+        self._email = re.compile(
+            r"(?<!\w)" r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" r"(?!\w)"
+        )
+
+        # MRN: Medical Record Number in MRN-XXXXXXX format.
+        # Case-insensitive prefix, 7-digit numeric suffix.
+        self._mrn = re.compile(
+            r"(?<!\w)" r"MRN-\d{7}" r"(?!\w)",
+            re.IGNORECASE,
+        )
+
+        # DOB: Dates in MM/DD/YYYY or YYYY-MM-DD format.
+        # Strict month (01-12), day (01-31), year (1900-2099).
+        self._dob = re.compile(
+            r"(?<!\w)"
+            r"(?:"
+            r"(?:0[1-9]|1[0-2])/(?:0[1-9]|[12]\d|3[01])/(?:19|20)\d{2}"
+            r"|"
+            r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+            r")"
+            r"(?!\w)"
+        )
+
+        # Credit Card: 16-digit numbers, dashed/spaced or undashed.
+        # Dashed: 1234-5678-9012-3456 or 1234 5678 9012 3456.
+        # Undashed: 1234567890123456.
+        self._credit_card = re.compile(
+            r"(?<!\w)" r"(?:\d{4}[- ]\d{4}[- ]\d{4}[- ]\d{4}|\d{16})" r"(?!\w)"
+        )
+
+        # IPv4: Dotted quad with 0-255 octet validation.
+        self._ipv4 = re.compile(
+            r"(?<!\w)"
+            r"(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}"
+            r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)"
+            r"(?!\w)"
+        )
+
+        # US Passport: 1 uppercase letter followed by 8 digits.
+        self._passport = re.compile(r"(?<!\w)[A-Z]\d{8}(?!\w)")
+
     def detect(self, text: str) -> list[DetectedEntity]:
         """Run all regex patterns against input text.
 
-        For dashless SSN matches, applies context-aware scoring to
-        disambiguate from other 9-digit numbers.
+        Runs SSN (dashed + dashless with context scoring), PHONE, EMAIL,
+        MRN, DOB, CREDIT_CARD, IPV4, and PASSPORT patterns. All matches
+        are returned as DetectedEntity with source="regex".
 
         Args:
             text: Raw input text to scan.
@@ -152,6 +225,13 @@ class RegexDetector:
         dashed_spans = self._detect_ssn_dashed(text)
         entities.extend(dashed_spans)
         entities.extend(self._detect_ssn_dashless(text, dashed_spans))
+        entities.extend(self._detect_phone(text))
+        entities.extend(self._detect_email(text))
+        entities.extend(self._detect_mrn(text))
+        entities.extend(self._detect_dob(text))
+        entities.extend(self._detect_credit_card(text))
+        entities.extend(self._detect_ipv4(text))
+        entities.extend(self._detect_passport(text))
         return entities
 
     def _detect_ssn_dashed(self, text: str) -> list[DetectedEntity]:
@@ -231,6 +311,153 @@ class RegexDetector:
                         source="regex",
                     )
                 )
+        return results
+
+    def _detect_phone(self, text: str) -> list[DetectedEntity]:
+        """Detect US phone numbers in (NNN) NNN-NNNN format.
+
+        Parenthesized format is distinctive enough to assign a fixed
+        high confidence without context scoring.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._phone.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="PHONE",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.phone_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_email(self, text: str) -> list[DetectedEntity]:
+        """Detect email addresses in standard user@domain.tld format.
+
+        Email format is unambiguous — matches get a fixed high confidence.
+        Trailing sentence punctuation (e.g. "user@ex.com.") is excluded
+        by the regex backtracking on the TLD match.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._email.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="EMAIL",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.email_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_mrn(self, text: str) -> list[DetectedEntity]:
+        """Detect Medical Record Numbers in MRN-XXXXXXX format.
+
+        MRN format is highly distinctive and unambiguous.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._mrn.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="MRN",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.mrn_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_dob(self, text: str) -> list[DetectedEntity]:
+        """Detect dates of birth in MM/DD/YYYY or YYYY-MM-DD format.
+
+        Strict month (01-12), day (01-31), year (1900-2099) boundaries
+        prevent false positives on arbitrary number sequences.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._dob.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="DOB",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.dob_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_credit_card(self, text: str) -> list[DetectedEntity]:
+        """Detect 16-digit credit card numbers, dashed/spaced or undashed.
+
+        Standard 16-digit formatting. The 16-digit length distinguishes
+        these from 9-digit SSNs without overlap risk.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._credit_card.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="CREDIT_CARD",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.credit_card_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_ipv4(self, text: str) -> list[DetectedEntity]:
+        """Detect IPv4 addresses with 0-255 octet validation.
+
+        Each octet is validated to the 0-255 range in the regex itself,
+        preventing false positives on version strings like 1.2.300.4.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._ipv4.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="IPV4",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.ipv4_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_passport(self, text: str) -> list[DetectedEntity]:
+        """Detect US passport numbers (1 uppercase letter + 8 digits).
+
+        Standard 9-alphanumeric US passport format. Case-sensitive to
+        reduce false positives on arbitrary alphanumeric strings.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._passport.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="PASSPORT",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.passport_score,
+                    token="",
+                    source="regex",
+                )
+            )
         return results
 
     def _score_dashless_context(
