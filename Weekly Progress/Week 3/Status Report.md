@@ -27,7 +27,7 @@
 
 | **Bigan** | | | | |
 
-| **Kyle** | <br>-Adjusted Build Process and Infrastructure as Project evolved, <br> - Reviewed PR's and helped resolve merge conflcits | Continue modifying build process / infrastructure as needed.  <br> Working on the Demo + Getting it publicly accessible  | 5-7 hours |
+| **Kyle** | <br>-Adjusted Build Process and Infrastructure as Project evolved, <br> - Reviewed PR's and helped resolve merge conflcits | Continue modifying build process / infrastructure as needed. <br> Working on the Demo + Getting it publicly accessible | 5-7 hours |
 
 | **Rainer** | | | | |
 
