@@ -13,10 +13,10 @@ fn extract_content_text(content: &Value) -> Option<String> {
 
         for part in parts {
             let part_type = part.get("type").and_then(|t| t.as_str());
-            if part_type == Some("text")
-                && let Some(t) = part.get("text").and_then(|t| t.as_str())
-            {
-                out.push_str(t);
+            if part_type == Some("text") {
+                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                    out.push_str(t);
+                }
             }
         }
 
