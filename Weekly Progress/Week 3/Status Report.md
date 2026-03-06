@@ -30,7 +30,7 @@
 
   
 
-**Total Team Time Spent:**
+**Total Team Time Spent:** ~58 hrs
 
   
 
@@ -39,3 +39,13 @@
   
 
 ## Weekly Summary
+This week, the Obscura team heavily focused on expanding the PII redaction pipeline and establishing the core infrastructure for the foundational Rust proxy backend. 
+
+**Key Accomplishments:**
+- **PII / ML Pipeline:** We achieved a 95.76% macro F1 score on the fine-tuned BERT NER model and expanded regex coverage for entities including DOB, Credit Card, IPv4, and US Passports. A configurable framework for redaction was implemented, and the BYOM ONNX Exporter CLI was completed to prepare for Rust integration.
+- **Proxy Infrastructure:** The core Rust proxy crate was scaffolded, including a health server and configuration loader. Support was added for HTTP request interception, upstream LLM forwarding, and OpenAI adapter integration (handling basic payloads and streaming delta extraction).
+- **Security & Observability:** The architectural design for Tower-based authentication middleware (fail-closed specs) was completed, and basic observability was established via a Prometheus `/metrics` endpoint.
+- **DevOps:** Build processes were adjusted to support the project's evolution, PRs were reviewed to manage merge conflicts, and preparations began for making the midterm demo publicly accessible.
+
+**Next Steps:**
+Looking ahead, the team will prioritize end-to-end integration for the Midterm Demo. Key goals include integrating the ONNX-exported model directly with the proxy, implementing the auth middleware into the main proxy routing pipeline, validating performance benchmarks (load testing and latency optimization on EC2), and creating the end-to-end demo Python script.
