@@ -26,7 +26,7 @@
 | **Kyle** | - Adjusted Build Process and Infrastructure as Project evolved<br>- Reviewed PRs and helped resolve merge conflicts | - Continue modifying build process / infrastructure as needed<br>- Working on the Demo + Getting it publicly accessible | | 5-7 hrs |
 | **Rainer** | - Scaffolded foundational Rust proxy crate with `tokio`, Hyper health server, and `obscura.toml` configuration loader (OBS-1)<br>- Implemented HTTP request interception, dynamic header parsing (`X-Obscura-Skip-Redaction`), and upstream LLM forwarding (OBS-7)<br>- Designed authentication middleware architecture using Tower, establishing fail-closed specs and strict error response schemas (OBS-12) | - Implement Tower authentication middleware into main proxy routing pipeline<br>- Finalize dynamic key injection security handling | Navigating hyper v1.0 migration and Tower compatibility for global middleware interception layers | 10-12 hrs |
 | **Eduardo** | - Implemented Prometheus `/metrics` endpoint and `http_requests_total` counter (OBS-11) | - Install k6, run baseline load tests on EC2 proxy, measure req/s and latency, document results with graphs (OBS-17) | - Initial git push (HTTP 500) and authorization issues | 7 hrs |
-| **Billy** | | | | |
+| **Billy** | Defined Tower auth middleware plan for Obscura: validate `Authorization: Bearer <token>` against `OBSCURA_API_KEY` (env var), return `401` when missing/malformed, return `403` when invalid, and use constant-time comparison for token validation. | Implement Tower middleware for auth (**OBS-22a**).<br>Add constant-time key comparison (**OBS-22b**).<br>Write tests for 401, 403, and 200 paths (**OBS-22c**). | 5 hrs|
 
   
 
