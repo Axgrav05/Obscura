@@ -1,3 +1,0 @@
-# Keep this directory tracked but ignore any generated artifacts
-*.log
-*.tmp
