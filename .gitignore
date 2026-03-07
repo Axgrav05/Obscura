@@ -27,11 +27,12 @@ __pycache__/
 *.egg-info/
 .ruff_cache/
 
-# Model artifacts (never commit weights)
+# Model artifacts (never commit weights or exported model directories)
 *.onnx
 *.bin
 *.pt
 *.safetensors
+ml/models/
 
 # Benchmark results (local, timestamped)
 ml/results/

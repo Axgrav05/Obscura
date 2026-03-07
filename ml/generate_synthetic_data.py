@@ -1,9 +1,10 @@
 """
 Synthetic PII/PHI Dataset Generator for Obscura NER Benchmarking
 
-Generates labeled NER samples using Faker with BIO tagging for both
-enterprise (names, orgs, SSNs, phones, emails) and clinical (MRN,
-patient names, DOB) entity types.
+Generates labeled NER samples using Faker with BIO tagging across
+enterprise (names, orgs, SSNs, phones, emails), clinical (MRN,
+patient names, DOB), financial (credit cards), and identity/tech
+(passport, IPv4) entity types.
 
 Output format: JSONL compatible with HuggingFace datasets, where each
 record contains `tokens` (word list) and `ner_tags` (BIO label list).
@@ -47,6 +48,12 @@ LABEL_LIST: list[str] = [
     "I-DOB",
     "B-MISC",
     "I-MISC",
+    "B-CREDIT_CARD",
+    "I-CREDIT_CARD",
+    "B-IPV4",
+    "I-IPV4",
+    "B-PASSPORT",
+    "I-PASSPORT",
 ]
 
 LABEL_TO_ID: dict[str, int] = {label: i for i, label in enumerate(LABEL_LIST)}
@@ -108,6 +115,26 @@ def _phone() -> str:
     b = random.randint(200, 999)
     c = random.randint(1000, 9999)
     return f"({a}) {b}-{c}"
+
+
+def _credit_card(dashed: bool = True) -> str:
+    """Generate a 16-digit credit card number."""
+    groups = [random.randint(1000, 9999) for _ in range(4)]
+    if dashed:
+        return "-".join(str(g) for g in groups)
+    return "".join(str(g) for g in groups)
+
+
+def _ipv4() -> str:
+    """Generate a random IPv4 address (non-reserved)."""
+    return ".".join(str(random.randint(1, 254)) for _ in range(4))
+
+
+def _passport() -> str:
+    """Generate a US passport number (1 uppercase letter + 8 digits)."""
+    letter = random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    digits = random.randint(10000000, 99999999)
+    return f"{letter}{digits}"
 
 
 def _tokenize_and_label(
@@ -355,6 +382,94 @@ def _clinical_sample() -> tuple[str, list[tuple[str, str]]]:
     return text, entities
 
 
+def _financial_sample() -> tuple[str, list[tuple[str, str]]]:
+    """Generate financial-domain samples with credit card numbers.
+
+    Dashed CC templates use the distinctive format (no trigger needed).
+    Undashed CC templates include trigger words (visa, credit, card)
+    so the context-aware regex detector can identify them.
+    """
+    person = fake.name()
+    org = fake.company()
+    phone = _phone()
+
+    dashed_templates = [
+        lambda p, o, cc, ph: (
+            f"Process refund for {p} at {o}. Card: {cc}. Contact: {ph}.",
+            [(p, "PER"), (o, "ORG"), (cc, "CREDIT_CARD"), (ph, "PHONE")],
+        ),
+        lambda p, o, cc, ph: (
+            f"Charge {cc} for the subscription renewal. Account holder: {p} at {o}.",
+            [(cc, "CREDIT_CARD"), (p, "PER"), (o, "ORG")],
+        ),
+        lambda p, o, cc, ph: (
+            f"{p} authorized payment via {cc} for services from {o}.",
+            [(p, "PER"), (cc, "CREDIT_CARD"), (o, "ORG")],
+        ),
+    ]
+
+    undashed_templates = [
+        lambda p, o, cc, ph: (
+            f"Visa card {cc} on file for {p} at {o}.",
+            [(cc, "CREDIT_CARD"), (p, "PER"), (o, "ORG")],
+        ),
+        lambda p, o, cc, ph: (
+            f"Credit card number {cc} belongs to {p}. Employer: {o}.",
+            [(cc, "CREDIT_CARD"), (p, "PER"), (o, "ORG")],
+        ),
+        lambda p, o, cc, ph: (
+            f"Debit card {cc} linked to {p} at {o}. Call {ph} to verify.",
+            [(cc, "CREDIT_CARD"), (p, "PER"), (o, "ORG"), (ph, "PHONE")],
+        ),
+    ]
+
+    if random.random() < 0.4:
+        cc = _credit_card(dashed=False)
+        template_fn = random.choice(undashed_templates)
+    else:
+        cc = _credit_card(dashed=True)
+        template_fn = random.choice(dashed_templates)
+
+    text, entities = template_fn(person, org, cc, phone)
+    return text, entities
+
+
+def _identity_tech_sample() -> tuple[str, list[tuple[str, str]]]:
+    """Generate samples with US passport numbers and/or IPv4 addresses."""
+    person = fake.name()
+    org = fake.company()
+    passport = _passport()
+    ipv4 = _ipv4()
+    email = fake.email()
+
+    templates = [
+        lambda p, o, pp, ip, e: (
+            f"Passport {pp} verified for {p} traveling on behalf of {o}.",
+            [(pp, "PASSPORT"), (p, "PER"), (o, "ORG")],
+        ),
+        lambda p, o, pp, ip, e: (
+            f"{p} from {o} presented passport number {pp} at the border.",
+            [(p, "PER"), (o, "ORG"), (pp, "PASSPORT")],
+        ),
+        lambda p, o, pp, ip, e: (
+            f"Employee {p} at {o} connected from {ip}. Email: {e}.",
+            [(p, "PER"), (o, "ORG"), (ip, "IPV4"), (e, "EMAIL")],
+        ),
+        lambda p, o, pp, ip, e: (
+            f"Login from {ip} by {p} flagged. Notify {o} security at {e}.",
+            [(ip, "IPV4"), (p, "PER"), (o, "ORG"), (e, "EMAIL")],
+        ),
+        lambda p, o, pp, ip, e: (
+            f"{p} at {o}: passport {pp}, last login from {ip}.",
+            [(p, "PER"), (o, "ORG"), (pp, "PASSPORT"), (ip, "IPV4")],
+        ),
+    ]
+
+    template_fn = random.choice(templates)
+    text, entities = template_fn(person, org, passport, ipv4, email)
+    return text, entities
+
+
 def _negative_sample() -> tuple[str, list[tuple[str, str]]]:
     """Generate a sample with 9-digit numbers in NON-SSN contexts.
 
@@ -392,11 +507,10 @@ def _negative_sample() -> tuple[str, list[tuple[str, str]]]:
 
 
 def generate_dataset(num_samples: int, output_path: Path) -> dict[str, int]:
-    """Generate a mixed enterprise + clinical + negative synthetic dataset.
+    """Generate a mixed synthetic dataset across multiple domains.
 
-    Splits: 50% enterprise (mix of dashed and dashless SSNs), 35% clinical,
-    15% negative (9-digit numbers in non-SSN context for disambiguation
-    testing).
+    Splits: 40% enterprise, 25% clinical, 15% financial (credit cards),
+    10% identity/tech (passport + IPv4), 10% negative (disambiguation).
 
     Args:
         num_samples: Total number of samples to generate.
@@ -408,15 +522,21 @@ def generate_dataset(num_samples: int, output_path: Path) -> dict[str, int]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     entity_counts: dict[str, int] = {}
-    num_enterprise = int(num_samples * 0.50)
-    num_clinical = int(num_samples * 0.35)
-    num_negative = num_samples - num_enterprise - num_clinical
+    num_enterprise = int(num_samples * 0.40)
+    num_clinical = int(num_samples * 0.25)
+    num_financial = int(num_samples * 0.15)
+    num_identity = int(num_samples * 0.10)
+    num_negative = (
+        num_samples - num_enterprise - num_clinical - num_financial - num_identity
+    )
 
     samples: list[dict] = []
 
     generators = (
         [(_enterprise_sample, num_enterprise)]
         + [(_clinical_sample, num_clinical)]
+        + [(_financial_sample, num_financial)]
+        + [(_identity_tech_sample, num_identity)]
         + [(_negative_sample, num_negative)]
     )
 

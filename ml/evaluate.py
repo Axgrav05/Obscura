@@ -168,9 +168,10 @@ def filter_to_bert_tags(tags: list[str]) -> list[str]:
 def filter_to_hybrid_tags(tags: list[str]) -> list[str]:
     """Filter ground-truth tags to types detectable by the hybrid pipeline.
 
-    In hybrid mode, BERT detects PER/LOC/ORG/MISC and regex detects SSN.
-    Other structured types (PHONE, EMAIL, MRN, DOB) that don't yet have
-    regex patterns are filtered to O to avoid artificially lowering recall.
+    In hybrid mode, BERT detects PER/LOC/ORG/MISC and regex detects
+    structured types (SSN, PHONE, EMAIL, MRN, DOB, CREDIT_CARD, IPV4,
+    PASSPORT).  Tags for entity types not in HYBRID_ENTITY_TYPES are
+    filtered to O to avoid artificially lowering recall.
 
     Args:
         tags: Full BIO tag list from the synthetic dataset.

@@ -8,7 +8,9 @@ Handles detection of:
   - EMAIL: standard user@domain.tld format.
   - MRN: Medical Record Number (MRN-XXXXXXX).
   - DOB: Dates in MM/DD/YYYY or YYYY-MM-DD format.
+    Uses context-aware scoring to disambiguate birth dates from generic dates.
   - CREDIT_CARD: 16-digit credit card numbers (dashed or undashed).
+    Undashed format uses context-aware scoring to reduce false positives.
   - IPV4: IPv4 addresses with 0-255 octet validation.
   - PASSPORT: US passport numbers (1 letter + 8 digits).
 
@@ -96,6 +98,78 @@ SSN_NEGATIVE_WORDS: frozenset[str] = frozenset(
     }
 )
 
+# --- DOB Context Scoring Constants ---
+
+# Trigger words that indicate a date is a birth date.
+DOB_TRIGGER_WORDS: frozenset[str] = frozenset(
+    {
+        "dob",
+        "birth",
+        "born",
+        "birthday",
+        "birthdate",
+        "age",
+        "newborn",
+        "neonatal",
+    }
+)
+
+# Two-word phrase providing strong DOB signal.
+DOB_TRIGGER_PHRASES: list[tuple[str, str]] = [
+    ("date", "of"),
+]
+
+# Negative context words — these indicate non-DOB dates.
+DOB_NEGATIVE_WORDS: frozenset[str] = frozenset(
+    {
+        "meeting",
+        "appointment",
+        "scheduled",
+        "deadline",
+        "due",
+        "expires",
+        "expiration",
+        "created",
+        "updated",
+        "filed",
+        "issued",
+        "effective",
+        "invoice",
+        "report",
+    }
+)
+
+# --- Credit Card Context Scoring Constants ---
+
+# Trigger words that indicate a 16-digit string is a credit card.
+CC_TRIGGER_WORDS: frozenset[str] = frozenset(
+    {
+        "visa",
+        "mastercard",
+        "amex",
+        "discover",
+        "card",
+        "credit",
+        "debit",
+        "cc",
+        "pan",
+        "cvv",
+    }
+)
+
+# Negative context words for credit card.
+CC_NEGATIVE_WORDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "identifier",
+        "tracking",
+        "order",
+        "receipt",
+        "routing",
+        "transaction",
+    }
+)
+
 
 @dataclass
 class RegexDetector:
@@ -122,8 +196,11 @@ class RegexDetector:
     phone_score: float = 0.95
     email_score: float = 0.99
     mrn_score: float = 0.99
-    dob_score: float = 0.95
+    dob_base_score: float = 0.50
+    dob_threshold: float = 0.70
     credit_card_score: float = 0.99
+    cc_undashed_base_score: float = 0.50
+    cc_undashed_threshold: float = 0.70
     ipv4_score: float = 0.95
     passport_score: float = 0.99
     _ssn_dashed: re.Pattern[str] = field(init=False, repr=False)
@@ -379,39 +456,56 @@ class RegexDetector:
     def _detect_dob(self, text: str) -> list[DetectedEntity]:
         """Detect dates of birth in MM/DD/YYYY or YYYY-MM-DD format.
 
-        Strict month (01-12), day (01-31), year (1900-2099) boundaries
-        prevent false positives on arbitrary number sequences.
+        Uses context-aware scoring to disambiguate birth dates from
+        generic dates (e.g., meeting dates, invoice dates). Only dates
+        with sufficient contextual evidence are emitted.
         """
         results: list[DetectedEntity] = []
         for match in self._dob.finditer(text):
-            results.append(
-                DetectedEntity(
-                    text=match.group(0),
-                    entity_type="DOB",
-                    start=match.start(),
-                    end=match.end(),
-                    score=self.dob_score,
-                    token="",
-                    source="regex",
+            m_start, m_end = match.start(), match.end()
+            score = self._score_dob_context(text, m_start, m_end)
+            if score >= self.dob_threshold:
+                results.append(
+                    DetectedEntity(
+                        text=match.group(0),
+                        entity_type="DOB",
+                        start=m_start,
+                        end=m_end,
+                        score=round(score, 4),
+                        token="",
+                        source="regex",
+                    )
                 )
-            )
         return results
 
     def _detect_credit_card(self, text: str) -> list[DetectedEntity]:
         """Detect 16-digit credit card numbers, dashed/spaced or undashed.
 
-        Standard 16-digit formatting. The 16-digit length distinguishes
-        these from 9-digit SSNs without overlap risk.
+        Dashed and spaced formats (e.g. 1234-5678-9012-3456) are
+        distinctive enough to get a fixed high score. Undashed 16-digit
+        strings use context-aware scoring to reduce false positives.
         """
         results: list[DetectedEntity] = []
         for match in self._credit_card.finditer(text):
+            matched_text = match.group(0)
+            m_start, m_end = match.start(), match.end()
+
+            # Dashed/spaced formats are unambiguous — full score.
+            is_undashed = matched_text.isdigit()
+            if is_undashed:
+                score = self._score_cc_context(text, m_start, m_end)
+                if score < self.cc_undashed_threshold:
+                    continue
+            else:
+                score = self.credit_card_score
+
             results.append(
                 DetectedEntity(
-                    text=match.group(0),
+                    text=matched_text,
                     entity_type="CREDIT_CARD",
-                    start=match.start(),
-                    end=match.end(),
-                    score=self.credit_card_score,
+                    start=m_start,
+                    end=m_end,
+                    score=round(score, 4),
                     token="",
                     source="regex",
                 )
@@ -459,6 +553,87 @@ class RegexDetector:
                 )
             )
         return results
+
+    def _score_dob_context(self, text: str, match_start: int, match_end: int) -> float:
+        """Score a date match based on surrounding context.
+
+        Examines words within self.context_window positions on each side.
+        Only dates near birth-related trigger words cross the threshold.
+
+        score = base (0.50)
+              + 0.40 if trigger word found (e.g., "dob", "birth", "born")
+              + 0.10 if trigger phrase found (e.g., "date of")
+              - 0.35 if negative word found (e.g., "meeting", "scheduled")
+
+        Clamped to [0.0, 1.0]. Only matches above dob_threshold
+        (default 0.70) are emitted.
+        """
+        words_before = text[:match_start].lower().split()
+        words_after = text[match_end:].lower().split()
+
+        context_words = (
+            words_before[-self.context_window :] + words_after[: self.context_window]
+        )
+
+        cleaned = [w.strip("()[]{}:;.,!?#\"'") for w in context_words]
+        cleaned_set = set(cleaned)
+
+        score = self.dob_base_score
+
+        # Positive: trigger words
+        if cleaned_set & DOB_TRIGGER_WORDS:
+            score += 0.40
+
+        # Positive: trigger phrases (bigram check)
+        for w1, w2 in DOB_TRIGGER_PHRASES:
+            for i in range(len(cleaned) - 1):
+                if cleaned[i] == w1 and cleaned[i + 1] == w2:
+                    score += 0.10
+                    break
+            else:
+                continue
+            break
+
+        # Negative: anti-DOB context words
+        if cleaned_set & DOB_NEGATIVE_WORDS:
+            score -= 0.35
+
+        return max(0.0, min(1.0, score))
+
+    def _score_cc_context(self, text: str, match_start: int, match_end: int) -> float:
+        """Score an undashed 16-digit match based on surrounding context.
+
+        Only called for undashed credit card matches. Dashed/spaced
+        formats bypass this and receive the full credit_card_score.
+
+        score = base (0.50)
+              + 0.45 if trigger word found (e.g., "visa", "card", "credit")
+              - 0.35 if negative word found (e.g., "tracking", "order")
+
+        Clamped to [0.0, 1.0]. Only matches above cc_undashed_threshold
+        (default 0.70) are emitted.
+        """
+        words_before = text[:match_start].lower().split()
+        words_after = text[match_end:].lower().split()
+
+        context_words = (
+            words_before[-self.context_window :] + words_after[: self.context_window]
+        )
+
+        cleaned = [w.strip("()[]{}:;.,!?#\"'") for w in context_words]
+        cleaned_set = set(cleaned)
+
+        score = self.cc_undashed_base_score
+
+        # Positive: trigger words
+        if cleaned_set & CC_TRIGGER_WORDS:
+            score += 0.45
+
+        # Negative: anti-CC context words
+        if cleaned_set & CC_NEGATIVE_WORDS:
+            score -= 0.35
+
+        return max(0.0, min(1.0, score))
 
     def _score_dashless_context(
         self, text: str, match_start: int, match_end: int
