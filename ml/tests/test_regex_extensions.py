@@ -402,3 +402,158 @@ class TestPassport:
         assert len(pp) == 1
         assert pp[0].score == 0.99
         assert pp[0].source == "regex"
+
+
+# ---------------------------------------------------------------------------
+# IPv6 detection
+# ---------------------------------------------------------------------------
+
+
+class TestIPv6:
+    """Tests for IPv6 address detection.
+
+    Covers full expansion, zero-compression (::), localhost (::1),
+    IPv4-mapped (::ffff:a.b.c.d), and edge cases including MAC address
+    and word-boundary rejection.
+    """
+
+    def test_full_expansion(self, detector: RegexDetector) -> None:
+        """Full 8-group IPv6 address is detected."""
+        text = "Server: 2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+        entities = detector.detect(text)
+        ipv6 = [e for e in entities if e.entity_type == "IPV6"]
+        assert len(ipv6) == 1
+        assert ipv6[0].text == "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+
+    def test_zero_compressed(self, detector: RegexDetector) -> None:
+        """Zero-compressed (::) IPv6 address is detected."""
+        text = "Route via 2001:db8::1 gateway."
+        entities = detector.detect(text)
+        ipv6 = [e for e in entities if e.entity_type == "IPV6"]
+        assert len(ipv6) == 1
+        assert ipv6[0].text == "2001:db8::1"
+
+    def test_localhost(self, detector: RegexDetector) -> None:
+        """IPv6 localhost ::1 is detected."""
+        text = "Bind to ::1 for loopback."
+        entities = detector.detect(text)
+        ipv6 = [e for e in entities if e.entity_type == "IPV6"]
+        assert len(ipv6) == 1
+        assert ipv6[0].text == "::1"
+
+    def test_ipv4_mapped(self, detector: RegexDetector) -> None:
+        """IPv4-mapped IPv6 address ::ffff:a.b.c.d is detected."""
+        text = "Mapped address: ::ffff:192.0.2.128"
+        entities = detector.detect(text)
+        ipv6 = [e for e in entities if e.entity_type == "IPV6"]
+        assert len(ipv6) == 1
+        assert ipv6[0].text == "::ffff:192.0.2.128"
+
+    def test_mac_address_rejected(self, detector: RegexDetector) -> None:
+        """MAC address aa:bb:cc:dd:ee:ff is NOT detected as IPv6.
+
+        MAC has 6 colon-separated hex groups with single colons only.
+        Full IPv6 requires 8 groups; compressed forms require ::.
+        """
+        text = "MAC: aa:bb:cc:dd:ee:ff"
+        entities = detector.detect(text)
+        ipv6 = [e for e in entities if e.entity_type == "IPV6"]
+        assert len(ipv6) == 0
+
+    def test_boundary_rejection(self, detector: RegexDetector) -> None:
+        """IPv6 embedded in an alphanumeric token is rejected."""
+        text = "IDX2001:db8::1Y"
+        entities = detector.detect(text)
+        ipv6 = [e for e in entities if e.entity_type == "IPV6"]
+        assert len(ipv6) == 0
+
+    def test_score_assignment(self, detector: RegexDetector) -> None:
+        """IPv6 entities get the configured score."""
+        text = "Host: 2001:db8::1"
+        entities = detector.detect(text)
+        ipv6 = [e for e in entities if e.entity_type == "IPV6"]
+        assert len(ipv6) == 1
+        assert ipv6[0].score == 0.95
+        assert ipv6[0].source == "regex"
+
+    def test_compressed_right_only(self, detector: RegexDetector) -> None:
+        """IPv6 with :: at the start and multiple right groups is detected."""
+        text = "Address ::2001:db8:85a3:8a2e"
+        entities = detector.detect(text)
+        ipv6 = [e for e in entities if e.entity_type == "IPV6"]
+        assert len(ipv6) == 1
+        assert "::2001:db8:85a3:8a2e" in ipv6[0].text
+
+
+# ---------------------------------------------------------------------------
+# International phone number detection
+# ---------------------------------------------------------------------------
+
+
+class TestInternationalPhone:
+    """Tests for E.164 international phone number detection.
+
+    Covers UK, German, and other ITU-T formatted numbers with +CC prefix.
+    Also verifies that US parenthesized format still works and that math
+    expressions with a leading + are correctly rejected.
+    """
+
+    def test_uk_number(self, detector: RegexDetector) -> None:
+        """UK international number +44 20 7123 4567 is detected."""
+        text = "Call us at +44 20 7123 4567 for support."
+        entities = detector.detect(text)
+        ph = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(ph) == 1
+        assert ph[0].text == "+44 20 7123 4567"
+
+    def test_german_number_with_area_parens(self, detector: RegexDetector) -> None:
+        """German number +49(0)30 123456 with parenthesised area code is detected."""
+        text = "Office: +49(0)30 123456"
+        entities = detector.detect(text)
+        ph = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(ph) == 1
+        assert "+49" in ph[0].text
+
+    def test_dashes_format(self, detector: RegexDetector) -> None:
+        """International number with hyphens +1-555-010-0293 is detected."""
+        text = "Fax: +1-555-010-0293"
+        entities = detector.detect(text)
+        ph = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(ph) == 1
+        assert ph[0].text == "+1-555-010-0293"
+
+    def test_dots_format(self, detector: RegexDetector) -> None:
+        """International number with dots +33.1.23.45.67 is detected."""
+        text = "Contact: +33.1.23.45.67"
+        entities = detector.detect(text)
+        ph = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(ph) == 1
+        assert "+33" in ph[0].text
+
+    def test_math_expression_rejected(self, detector: RegexDetector) -> None:
+        """Math expression '+1 - 45 = -44' is NOT detected as a phone number.
+
+        The = and * operators are not in the allowed separator set, so the
+        pattern cannot form 2+ valid digit groups after the country code.
+        """
+        text = "Result: +1 - 45 = -44"
+        entities = detector.detect(text)
+        ph = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(ph) == 0
+
+    def test_us_format_still_detected(self, detector: RegexDetector) -> None:
+        """Existing US (NNN) NNN-NNNN format still works after pattern update."""
+        text = "Call (555) 867-5309 now."
+        entities = detector.detect(text)
+        ph = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(ph) == 1
+        assert ph[0].text == "(555) 867-5309"
+
+    def test_score_assignment(self, detector: RegexDetector) -> None:
+        """International phone entities get the configured phone_score."""
+        text = "Mobile: +44 7700 900123"
+        entities = detector.detect(text)
+        ph = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(ph) == 1
+        assert ph[0].score == 0.95
+        assert ph[0].source == "regex"
