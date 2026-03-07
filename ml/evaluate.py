@@ -65,6 +65,7 @@ HYBRID_ENTITY_TYPES: set[str] = BERT_ENTITY_TYPES | {
     "DOB",
     "CREDIT_CARD",
     "IPV4",
+    "IPV6",
     "PASSPORT",
 }
 
@@ -297,6 +298,7 @@ def align_hybrid_predictions_to_words(
         "DOB": "DOB",
         "CREDIT_CARD": "CREDIT_CARD",
         "IPV4": "IPV4",
+        "IPV6": "IPV6",
         "PASSPORT": "PASSPORT",
     }
 

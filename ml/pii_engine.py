@@ -44,7 +44,7 @@ MODEL_ID = "dslim/bert-base-NER"
 
 # Entity types where regex is authoritative (deterministic patterns).
 REGEX_AUTHORITATIVE_TYPES: frozenset[str] = frozenset(
-    {"SSN", "PHONE", "EMAIL", "MRN", "DOB", "CREDIT_CARD", "IPV4", "PASSPORT"}
+    {"SSN", "PHONE", "EMAIL", "MRN", "DOB", "CREDIT_CARD", "IPV4", "IPV6", "PASSPORT"}
 )
 
 # Entity types where the transformer is authoritative (semantic).
