@@ -7,7 +7,7 @@ export const options = {
 };
 
 export default function () {
-  const res = http.get('http://YOUR_PROXY_URL');
+  const res = http.get('http://localhost:8080');
 
   check(res, {
     'status is 200': (r) => r.status === 200,
