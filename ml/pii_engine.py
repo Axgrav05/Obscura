@@ -4,8 +4,15 @@ Obscura PII/PHI Redaction Engine
 Hybrid BERT + regex NER engine for PII/PHI detection with Presidio-style
 reversible masking. The BERT transformer detects semantic entities (PERSON,
 ORGANIZATION, LOCATION) while deterministic regex patterns catch structured
-PII (SSN, with PHONE/EMAIL/MRN planned). Results are merged via conflict
-resolution rules (GAMEPLAN.md Section 2.3).
+PII (SSN, PHONE, EMAIL, MRN, DOB, CREDIT_CARD, IPV4, IPV6, PASSPORT).
+Results are merged via conflict resolution rules (GAMEPLAN.md Section 2.3).
+
+Long payloads (> ~400 words) are split into overlapping chunks at natural
+sentence boundaries so that BERT never exceeds its 512-token window. The
+last sentence of each chunk is repeated as the first sentence of the next
+chunk (stride overlap) to preserve context for boundary-spanning entities.
+Local offsets from each chunk are mapped back to global character positions
+before deduplication via the existing span-merge algorithm.
 
 Detected entities are replaced with indexed tokens (e.g., [PERSON_1],
 [SSN_2]) and tracked in a mapping dictionary for downstream restoration
@@ -182,6 +189,7 @@ class PIIEngine:
     confidence_threshold: float = 0.90
     aggregation_strategy: str = "simple"
     enable_regex: bool = True
+    chunk_size: int = 1500  # ~300 tokens — safe buffer below BERT's 512-token ceiling
     regex_detector: RegexDetector = field(default_factory=RegexDetector)
     label_adapter: dict[str, str] | None = None
     _pipeline: TokenClassificationPipeline | None = field(
@@ -237,15 +245,74 @@ class PIIEngine:
             return merge_entities(bert_entities, regex_entities)
         return bert_entities
 
-    def _detect_bert(self, text: str) -> list[DetectedEntity]:
-        """Run BERT NER pipeline and return entities above threshold.
+    def _chunk_text(self, text: str) -> list[tuple[str, int]]:
+        """Split text into overlapping chunks at natural sentence boundaries.
 
-        Separated from detect() to isolate BERT-specific logic from
-        the hybrid orchestration.
+        Chunks are kept under self.chunk_size characters (~300 tokens) so
+        BERT never hits its 512-token ceiling. The last sentence of each
+        chunk is repeated as the first sentence of the next (stride overlap)
+        to preserve context for entities that span chunk boundaries.
+
+        Args:
+            text: Full input text to be chunked.
+
+        Returns:
+            List of (chunk_text, global_start_offset) tuples. A single-element
+            list is returned when the text fits within chunk_size.
         """
-        raw_entities = self._pipeline(text)
-        detected: list[DetectedEntity] = []
+        if len(text) <= self.chunk_size:
+            return [(text, 0)]
 
+        # Collect positions immediately after each sentence delimiter.
+        boundaries: list[int] = [0]
+        for char_pos, ch in enumerate(text):
+            if ch in (".", ";", "\n") and char_pos + 1 < len(text):
+                boundaries.append(char_pos + 1)
+        if boundaries[-1] != len(text):
+            boundaries.append(len(text))
+
+        n_bounds: int = len(boundaries)
+        chunks: list[tuple[str, int]] = []
+        sent_idx: int = 0  # boundary index for the start of the current chunk
+
+        while sent_idx < n_bounds - 1:
+            chunk_start: int = boundaries[sent_idx]
+
+            # end_idx is the inclusive end-boundary index for this chunk.
+            # Advance while including the next sentence still fits within chunk_size.
+            # We check boundaries[end_idx+1] (sentence end), not boundaries[end_idx]
+            # (sentence start), so text[chunk_start:boundaries[end_idx]] <= chunk_size.
+            end_idx: int = sent_idx + 1
+            while end_idx < n_bounds - 1:
+                if boundaries[end_idx + 1] - chunk_start > self.chunk_size:
+                    break
+                end_idx += 1
+
+            chunk_end: int = boundaries[end_idx]
+            chunks.append((text[chunk_start:chunk_end], chunk_start))
+
+            # Stride: next chunk starts at the last sentence of this chunk.
+            # Guard: if only one sentence fit (end_idx == sent_idx+1), advance past it.
+            sent_idx = end_idx - 1 if end_idx - 1 > sent_idx else end_idx
+
+        return chunks
+
+    def _parse_bert_results(
+        self,
+        raw_entities: list[dict],
+        global_offset: int,
+    ) -> list[DetectedEntity]:
+        """Convert raw pipeline dicts to DetectedEntity with global offsets.
+
+        Args:
+            raw_entities: Entity dicts from the HuggingFace NER pipeline.
+            global_offset: Character offset of this chunk's start in the
+                original full text. Added to each entity's start/end.
+
+        Returns:
+            Filtered, mapped DetectedEntity list above confidence_threshold.
+        """
+        detected: list[DetectedEntity] = []
         for ent in raw_entities:
             score = float(ent["score"])
             if score < self.confidence_threshold:
@@ -263,15 +330,42 @@ class PIIEngine:
                 DetectedEntity(
                     text=ent["word"],
                     entity_type=entity_type,
-                    start=int(ent["start"]),
-                    end=int(ent["end"]),
+                    start=int(ent["start"]) + global_offset,
+                    end=int(ent["end"]) + global_offset,
                     score=score,
                     token="",
                     source="bert",
                 )
             )
-
         return detected
+
+    def _detect_bert(self, text: str) -> list[DetectedEntity]:
+        """Run BERT NER pipeline with context-aware chunking for long texts.
+
+        Splits text into overlapping chunks (see _chunk_text), batches them
+        through the HuggingFace pipeline, maps local offsets back to global
+        positions, and deduplicates any entities captured twice by the stride
+        overlap using the existing span-merge conflict-resolution algorithm.
+        """
+        chunks = self._chunk_text(text)
+
+        if len(chunks) == 1:
+            # Fast path: short text fits in one pass — no batching overhead.
+            chunk_text, _ = chunks[0]
+            return self._parse_bert_results(self._pipeline(chunk_text), global_offset=0)
+
+        # Batch all chunks in one pipeline call.
+        # HuggingFace NER pipeline: list[str] → list[list[dict]]
+        chunk_texts = [c for c, _ in chunks]
+        chunk_offsets = [o for _, o in chunks]
+        batch_results: list[list[dict]] = self._pipeline(chunk_texts)
+
+        all_entities: list[DetectedEntity] = []
+        for raw_results, global_offset in zip(batch_results, chunk_offsets):
+            all_entities.extend(self._parse_bert_results(raw_results, global_offset))
+
+        # Deduplicate entities detected twice due to stride overlap.
+        return merge_entities(all_entities, [])
 
     def redact(
         self, text: str, disabled_entities: list[str] | None = None
