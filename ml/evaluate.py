@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 import psutil
+import torch
 from seqeval.metrics import (
     classification_report,
     f1_score,
@@ -322,6 +323,7 @@ def run_evaluation(
     dataset_path: Path,
     limit: int | None = None,
     mode: str = "hybrid",
+    device: str = "auto",
 ) -> dict:
     """Run full evaluation: load model, infer on dataset, compute metrics.
 
@@ -338,15 +340,28 @@ def run_evaluation(
     rss_before_mb = _get_memory_mb()
     tracemalloc.start()
 
-    print(f"Loading model: {model_name} (mode={mode})")
+    print(f"Loading model: {model_name} (mode={mode}, device={device})")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForTokenClassification.from_pretrained(model_name)
+
+    if device == "cuda":
+        if not torch.cuda.is_available():
+            raise SystemExit("CUDA requested for evaluation but no CUDA device is available.")
+        pipeline_device = 0
+        engine_device = "cuda"
+    elif device == "cpu":
+        pipeline_device = -1
+        engine_device = "cpu"
+    else:
+        pipeline_device = 0 if torch.cuda.is_available() else -1
+        engine_device = "cuda" if torch.cuda.is_available() else "cpu"
+
     ner_pipe = pipeline(
         "ner",
         model=model,
         tokenizer=tokenizer,
         aggregation_strategy="simple",
-        device=-1,  # CPU — matches production target
+        device=pipeline_device,
     )
 
     # Auto-detect label adapter for non-IOB2 models (e.g. StanfordAIMI).
@@ -361,6 +376,7 @@ def run_evaluation(
 
         engine = PIIEngine(
             model_id=model_name,
+            device=engine_device,
             enable_regex=True,
             label_adapter=label_adapter,
         )
@@ -596,6 +612,13 @@ def main() -> None:
             "evaluated. (default: hybrid)"
         ),
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="Inference device for evaluation (default: auto)",
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset)
@@ -612,7 +635,11 @@ def main() -> None:
 
     for model_name in args.model:
         results = run_evaluation(
-            model_name, dataset_path, limit=args.limit, mode=args.mode
+            model_name,
+            dataset_path,
+            limit=args.limit,
+            mode=args.mode,
+            device=args.device,
         )
         print_results(results)
         saved_path = save_results(results, results_dir)

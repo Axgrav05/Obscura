@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import sys
 import time
@@ -52,6 +53,11 @@ _VALIDATION_SENTENCES: list[str] = [
     "Referred to St. Luke's Hospital by Dr. Sarah Chen.",
     "Invoice #9842 sent to Global Industries, attn: Mike Taylor.",
 ]
+
+
+def _slugify_bundle_name(model_id: str) -> str:
+    base_name = Path(model_id).name if Path(model_id).exists() else model_id.split("/")[-1]
+    return re.sub(r"[^a-zA-Z0-9]+", "-", base_name).strip("-").lower() or "obscura-ner"
 
 
 def export_model(model_id: str, output_dir: Path) -> Path:
@@ -369,7 +375,7 @@ def package_bundle(
     Returns:
         Path to the bundle directory.
     """
-    bundle_dir = output_dir / f"bert-ner-v{version}"
+    bundle_dir = output_dir / f"{_slugify_bundle_name(model_id)}-v{version}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     # -- Determine primary model (INT8 preferred) --
@@ -386,7 +392,15 @@ def package_bundle(
         shutil.copy2(onnx_fp32_path, bundle_dir / "model_fp32.onnx")
 
     # -- Copy tokenizer files --
-    for name in ("tokenizer.json", "special_tokens_map.json"):
+    for name in (
+        "tokenizer.json",
+        "special_tokens_map.json",
+        "tokenizer_config.json",
+        "vocab.txt",
+        "merges.txt",
+        "sentencepiece.bpe.model",
+        "added_tokens.json",
+    ):
         src = output_dir / name
         if src.exists():
             shutil.copy2(src, bundle_dir / name)
@@ -395,15 +409,6 @@ def package_bundle(
     model = AutoModelForTokenClassification.from_pretrained(model_id)
     label_map: dict[str, str] = {str(k): v for k, v in model.config.id2label.items()}
     _write_json(bundle_dir / "label_map.json", label_map)
-    _EXPECTED_LABEL_COUNT = 9
-    if len(label_map) != _EXPECTED_LABEL_COUNT:
-        print(
-            f"WARNING: label_map has {len(label_map)} labels,"
-            f" expected {_EXPECTED_LABEL_COUNT}."
-            " Verify id2label in the model config.",
-            file=sys.stderr,
-        )
-
     # -- schema.json (integration contract for Rust proxy) --
     schema = {
         "model_version": version,
@@ -437,7 +442,7 @@ def package_bundle(
             "IPV4",
             "PASSPORT",
         ],
-        "bert_entity_types": ["PER", "LOC", "ORG", "MISC"],
+        "bert_entity_types": ["PER", "LOC", "ORG", "PHONE", "MISC"],
     }
     _write_json(bundle_dir / "schema.json", schema)
 

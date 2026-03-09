@@ -5,21 +5,29 @@ description = "BERT-NER PII/PHI redaction engine for Obscura proxy"
 requires-python = ">=3.11"
 
 dependencies = [
+    "accelerate",
     "transformers",
     "torch",
     "optimum",
+    "onnx",
+    "onnxscript",
     "onnxruntime",
+    "flask",
+    "flask-cors",
+    "faker",
     "scispacy",
     "datasets",
     "seqeval",
     "psutil",
     "pandas",
+    "pillow",
+    "pyarrow",
     "numpy",
+    "python-dateutil",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "faker",
     "ruff",
     "black",
     "pytest",

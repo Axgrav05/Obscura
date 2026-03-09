@@ -181,6 +181,120 @@ class TestDOBContext:
 
 
 # ---------------------------------------------------------------------------
+# Generic Date/Time detection
+# ---------------------------------------------------------------------------
+
+
+class TestDateAndTime:
+    """Tests for generic date and timestamp extraction."""
+
+    def test_birth_day_old_year_detected_as_date(self, detector: RegexDetector) -> None:
+        """Historical birth-style dates still surface as DATE."""
+        text = "Birth Day: 09/09/1752"
+        entities = detector.detect(text)
+        dates = [e for e in entities if e.entity_type == "DATE"]
+        dobs = [e for e in entities if e.entity_type == "DOB"]
+        assert len(dates) == 1
+        assert dates[0].text == "09/09/1752"
+        assert len(dobs) == 0
+
+    def test_generic_date_detected(self, detector: RegexDetector) -> None:
+        """Neutral calendar dates are emitted as DATE."""
+        text = "Invoice date: 01/15/2026"
+        entities = detector.detect(text)
+        dates = [e for e in entities if e.entity_type == "DATE"]
+        assert len(dates) == 1
+        assert dates[0].text == "01/15/2026"
+        assert dates[0].score == detector.date_score
+
+    def test_year_first_slash_date_detected(self, detector: RegexDetector) -> None:
+        """Slash-separated year-first dates are emitted as DATE."""
+        text = "Actually its on 2025/05/23 for sure"
+        entities = detector.detect(text)
+        dates = [e for e in entities if e.entity_type == "DATE"]
+        assert len(dates) == 1
+        assert dates[0].text == "2025/05/23"
+        assert dates[0].score == detector.date_score
+
+    def test_dob_not_duplicated_as_date(self, detector: RegexDetector) -> None:
+        """A birth-context date stays DOB and is not duplicated as DATE."""
+        text = "DOB: 03/15/1990"
+        entities = detector.detect(text)
+        dates = [e for e in entities if e.entity_type == "DATE"]
+        dobs = [e for e in entities if e.entity_type == "DOB"]
+        assert len(dates) == 0
+        assert len(dobs) == 1
+
+    def test_timestamp_detected(self, detector: RegexDetector) -> None:
+        """Fractional-second timestamps are emitted as TIME."""
+        text = "Timestamp: 18:23:45.123"
+        entities = detector.detect(text)
+        times = [e for e in entities if e.entity_type == "TIME"]
+        assert len(times) == 1
+        assert times[0].text == "18:23:45.123"
+        assert times[0].score == detector.time_score
+
+    def test_simple_time_detected(self, detector: RegexDetector) -> None:
+        """Short HH:MM times are also emitted as TIME."""
+        text = "Review at 08:30 tomorrow."
+        entities = detector.detect(text)
+        times = [e for e in entities if e.entity_type == "TIME"]
+        assert len(times) == 1
+        assert times[0].text == "08:30"
+
+    def test_textual_date_detected(self, detector: RegexDetector) -> None:
+        """Textual month dates are emitted as DATE."""
+        text = "The hearing is set for March 7th, 2026."
+        entities = detector.detect(text)
+        dates = [e for e in entities if e.entity_type == "DATE"]
+        assert len(dates) == 1
+        assert dates[0].text == "March 7th, 2026"
+
+    def test_day_first_textual_date_detected(self, detector: RegexDetector) -> None:
+        """Day-first textual dates are emitted as DATE."""
+        text = "Follow-up on 7 March 2026 at the clinic."
+        entities = detector.detect(text)
+        dates = [e for e in entities if e.entity_type == "DATE"]
+        assert len(dates) == 1
+        assert dates[0].text == "7 March 2026"
+
+    def test_day_first_numeric_date_detected(self, detector: RegexDetector) -> None:
+        """Day-first numeric dates are emitted as DATE."""
+        text = "Rescheduled for 23/05/2025 due to weather."
+        entities = detector.detect(text)
+        dates = [e for e in entities if e.entity_type == "DATE"]
+        assert len(dates) == 1
+        assert dates[0].text == "23/05/2025"
+
+    def test_iso_datetime_yields_date_and_time(self, detector: RegexDetector) -> None:
+        """ISO datetimes produce separate DATE and TIME spans."""
+        text = "Logged at 2025-05-23T18:23:45.123Z by the system."
+        entities = detector.detect(text)
+        dates = [e for e in entities if e.entity_type == "DATE"]
+        times = [e for e in entities if e.entity_type == "TIME"]
+        assert len(dates) == 1
+        assert dates[0].text == "2025-05-23"
+        assert len(times) == 1
+        assert times[0].text == "18:23:45.123Z"
+
+    def test_twelve_hour_time_detected(self, detector: RegexDetector) -> None:
+        """12-hour clock times with meridiem are emitted as TIME."""
+        text = "The call starts at 6:45 PM sharp."
+        entities = detector.detect(text)
+        times = [e for e in entities if e.entity_type == "TIME"]
+        assert len(times) == 1
+        assert times[0].text == "6:45 PM"
+
+    def test_midnight_detected(self, detector: RegexDetector) -> None:
+        """Named time keywords are emitted as TIME."""
+        text = "The batch rolled over at midnight."
+        entities = detector.detect(text)
+        times = [e for e in entities if e.entity_type == "TIME"]
+        assert len(times) == 1
+        assert times[0].text.lower() == "midnight"
+
+
+# ---------------------------------------------------------------------------
 # Credit Card detection
 # ---------------------------------------------------------------------------
 
@@ -285,6 +399,70 @@ class TestCreditCardContext:
         cc = [e for e in entities if e.entity_type == "CREDIT_CARD"]
         assert len(cc) == 1
         assert cc[0].score == 0.99
+
+
+# ---------------------------------------------------------------------------
+# Phone detection
+# ---------------------------------------------------------------------------
+
+
+class TestPhone:
+    """Tests for domestic and international phone detection."""
+
+    def test_us_parenthesized_phone(self, detector: RegexDetector) -> None:
+        """Classic US phone format is still detected."""
+        text = "Call me at (555) 123-4567 tomorrow."
+        entities = detector.detect(text)
+        phones = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(phones) == 1
+        assert phones[0].text == "(555) 123-4567"
+
+    def test_international_plus_phone_detected(self, detector: RegexDetector) -> None:
+        """International +CC phone numbers are detected."""
+        text = "Please feel free to contact me at +995 344 782 69 or via email at test@example.com"
+        entities = detector.detect(text)
+        phones = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(phones) == 1
+        assert phones[0].text == "+995 344 782 69"
+
+    def test_international_00_prefix_phone_detected(self, detector: RegexDetector) -> None:
+        """International 00CC phone numbers are detected."""
+        text = "Emergency callback: 00420 222 333 444"
+        entities = detector.detect(text)
+        phones = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(phones) == 1
+        assert phones[0].text == "00420 222 333 444"
+
+    def test_short_prefixed_number_rejected(self, detector: RegexDetector) -> None:
+        """Too-short international-looking numbers are rejected."""
+        text = "Ignore +44 12"
+        entities = detector.detect(text)
+        phones = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(phones) == 0
+
+    def test_us_dashed_phone_detected(self, detector: RegexDetector) -> None:
+        """Regular US dashed numbers are detected."""
+        text = "Call 415-555-2671 after 5pm."
+        entities = detector.detect(text)
+        phones = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(phones) == 1
+        assert phones[0].text == "415-555-2671"
+
+    def test_us_spaced_phone_detected(self, detector: RegexDetector) -> None:
+        """Regular US spaced numbers are detected."""
+        text = "Alternate number 415 555 2671 is on file."
+        entities = detector.detect(text)
+        phones = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(phones) == 1
+        assert phones[0].text == "415 555 2671"
+
+    def test_local_grouped_phone_detected(self, detector: RegexDetector) -> None:
+        """Grouped local numbers with trunk prefix are detected."""
+        text = "Callback number 0899 862 573 was provided."
+        entities = detector.detect(text)
+        phones = [e for e in entities if e.entity_type == "PHONE"]
+        assert len(phones) == 1
+        assert phones[0].text == "0899 862 573"
 
 
 # ---------------------------------------------------------------------------

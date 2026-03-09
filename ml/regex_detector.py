@@ -4,11 +4,14 @@ Deterministic regex-based PII detector for structured entity types.
 Handles detection of:
   - SSN: dashed (XXX-XX-XXXX) and dashless (XXXXXXXXX) formats.
     Dashless uses context-aware scoring to disambiguate from other 9-digit numbers.
-  - PHONE: US format (NNN) NNN-NNNN.
+    - PHONE: US local formats, +CC / 00CC international formats, and grouped
+        local numbers such as 0899 862 573.
   - EMAIL: standard user@domain.tld format.
   - MRN: Medical Record Number (MRN-XXXXXXX).
   - DOB: Dates in MM/DD/YYYY or YYYY-MM-DD format.
     Uses context-aware scoring to disambiguate birth dates from generic dates.
+    - DATE: Generic calendar dates in MM/DD/YYYY or YYYY-MM-DD format.
+    - TIME: Clock times such as HH:MM, HH:MM:SS, or HH:MM:SS.mmm.
   - CREDIT_CARD: 16-digit credit card numbers (dashed or undashed).
     Undashed format uses context-aware scoring to reduce false positives.
   - IPV4: IPv4 addresses with 0-255 octet validation.
@@ -26,6 +29,7 @@ import re
 from dataclasses import dataclass, field
 
 from ml.schemas import DetectedEntity
+from ml.temporal_detector import TemporalDetector
 
 # --- SSN Context Scoring Constants ---
 
@@ -176,7 +180,7 @@ class RegexDetector:
     """Deterministic regex detector for structured PII patterns.
 
     Supports SSN (dashed and dashless with context disambiguation),
-    PHONE (US parenthesized format), and EMAIL detection.
+    PHONE (US and international formats), and EMAIL detection.
 
     Attributes:
         context_window: Number of words on each side of a match to
@@ -198,6 +202,8 @@ class RegexDetector:
     mrn_score: float = 0.99
     dob_base_score: float = 0.50
     dob_threshold: float = 0.70
+    date_score: float = 0.93
+    time_score: float = 0.92
     credit_card_score: float = 0.99
     cc_undashed_base_score: float = 0.50
     cc_undashed_threshold: float = 0.70
@@ -206,15 +212,25 @@ class RegexDetector:
     _ssn_dashed: re.Pattern[str] = field(init=False, repr=False)
     _ssn_dashless: re.Pattern[str] = field(init=False, repr=False)
     _phone: re.Pattern[str] = field(init=False, repr=False)
+    _phone_us: re.Pattern[str] = field(init=False, repr=False)
+    _phone_international: re.Pattern[str] = field(init=False, repr=False)
+    _phone_local_grouped: re.Pattern[str] = field(init=False, repr=False)
     _email: re.Pattern[str] = field(init=False, repr=False)
     _mrn: re.Pattern[str] = field(init=False, repr=False)
     _dob: re.Pattern[str] = field(init=False, repr=False)
+    _date: re.Pattern[str] = field(init=False, repr=False)
+    _time: re.Pattern[str] = field(init=False, repr=False)
     _credit_card: re.Pattern[str] = field(init=False, repr=False)
     _ipv4: re.Pattern[str] = field(init=False, repr=False)
     _passport: re.Pattern[str] = field(init=False, repr=False)
+    _temporal_detector: TemporalDetector = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compile regex patterns once at construction time."""
+        self._temporal_detector = TemporalDetector(
+            date_score=self.date_score,
+            time_score=self.time_score,
+        )
         # Dashed SSN: XXX-XX-XXXX with IRS-valid structure.
         # Lookaheads prevent 000/666/9XX area, 00 group, 0000 serial.
         # Word-character lookbehind/lookahead rejects alpha-adjacent
@@ -232,11 +248,44 @@ class RegexDetector:
         # a longer alphanumeric string.
         self._ssn_dashless = re.compile(r"(?<!\w)(\d{9})(?!\w)")
 
-        # US phone: (NNN) NNN-NNNN format. Optional space after closing
-        # paren. Word-char lookahead rejects alpha-adjacent matches
-        # like "(123) 456-7890ABC".
+        # Legacy US phone: (NNN) NNN-NNNN format.
         self._phone = re.compile(
             r"(?<!\w)" r"\(\d{3}\)" r"\s?" r"\d{3}-\d{4}" r"(?!\w)"
+        )
+
+        # General US phone: optional country prefix, area code in parens or
+        # plain digits, and common separators. Examples:
+        #   415-555-2671
+        #   415 555 2671
+        #   1-415-555-2671
+        #   (415) 555 2671
+        self._phone_us = re.compile(
+            r"(?<!\w)"
+            r"(?:\+?1[\s.-]?)?"
+            r"(?:\(\d{3}\)|\d{3})"
+            r"[\s.-]?"
+            r"\d{3}"
+            r"[\s.-]"
+            r"\d{4}"
+            r"(?!\w)"
+        )
+
+        # International phone: requires an explicit +CC or 00CC prefix,
+        # then 2-5 digit groups separated by spaces/dashes/parentheses.
+        self._phone_international = re.compile(
+            r"(?<!\w)"
+            r"(?:\+\d{1,3}|00\d{1,3})"
+            r"(?:[\s-]?\(?\d{1,4}\)?){2,5}"
+            r"(?!\w)"
+        )
+
+        # Grouped local numbers that start with a trunk prefix 0 and use
+        # separators, e.g. 0899 862 573 or 0412-555-1234.
+        self._phone_local_grouped = re.compile(
+            r"(?<!\w)"
+            r"0\d{2,4}"
+            r"(?:[\s.-]\d{2,4}){2,3}"
+            r"(?!\w)"
         )
 
         # Email: standard user@domain.tld format.
@@ -267,6 +316,30 @@ class RegexDetector:
             r"(?!\w)"
         )
 
+        # Generic dates: month-first and year-first variants, with support for
+        # older years for historical records and field labels such as
+        # "Birth Day".
+        self._date = re.compile(
+            r"(?<!\w)"
+            r"(?:"
+            r"(?:0[1-9]|1[0-2])/(?:0[1-9]|[12]\d|3[01])/(?:1\d{3}|2\d{3})"
+            r"|"
+            r"(?:1\d{3}|2\d{3})/(?:0[1-9]|1[0-2])/(?:0[1-9]|[12]\d|3[01])"
+            r"|"
+            r"(?:1\d{3}|2\d{3})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+            r")"
+            r"(?!\w)"
+        )
+
+        # Clock times: HH:MM, HH:MM:SS, and HH:MM:SS.mmmmmm, with optional AM/PM.
+        self._time = re.compile(
+            r"(?<!\w)"
+            r"(?:[01]\d|2[0-3]):[0-5]\d"
+            r"(?:\:[0-5]\d(?:\.\d{1,6})?)?"
+            r"(?:\s?(?:AM|PM|am|pm))?"
+            r"(?!\w)"
+        )
+
         # Credit Card: 16-digit numbers, dashed/spaced or undashed.
         # Dashed: 1234-5678-9012-3456 or 1234 5678 9012 3456.
         # Undashed: 1234567890123456.
@@ -289,7 +362,7 @@ class RegexDetector:
         """Run all regex patterns against input text.
 
         Runs SSN (dashed + dashless with context scoring), PHONE, EMAIL,
-        MRN, DOB, CREDIT_CARD, IPV4, and PASSPORT patterns. All matches
+        MRN, DOB, DATE, TIME, CREDIT_CARD, IPV4, and PASSPORT patterns. All matches
         are returned as DetectedEntity with source="regex".
 
         Args:
@@ -305,7 +378,32 @@ class RegexDetector:
         entities.extend(self._detect_phone(text))
         entities.extend(self._detect_email(text))
         entities.extend(self._detect_mrn(text))
-        entities.extend(self._detect_dob(text))
+        dob_entities = self._detect_dob(text)
+        entities.extend(dob_entities)
+        date_entities = self._detect_date(text, dob_entities)
+        entities.extend(date_entities)
+        temporal_entities = self._temporal_detector.detect(
+            text,
+            occupied_spans=[
+                (entity.start, entity.end)
+                for entity in dob_entities + date_entities
+            ],
+        )
+        entities.extend(temporal_entities)
+
+        occupied_temporal_spans = [
+            (entity.start, entity.end)
+            for entity in dob_entities + date_entities + temporal_entities
+        ]
+        time_entities = [
+            entity
+            for entity in self._detect_time(text)
+            if not any(
+                entity.start < occupied_end and occupied_start < entity.end
+                for occupied_start, occupied_end in occupied_temporal_spans
+            )
+        ]
+        entities.extend(time_entities)
         entities.extend(self._detect_credit_card(text))
         entities.extend(self._detect_ipv4(text))
         entities.extend(self._detect_passport(text))
@@ -391,24 +489,57 @@ class RegexDetector:
         return results
 
     def _detect_phone(self, text: str) -> list[DetectedEntity]:
-        """Detect US phone numbers in (NNN) NNN-NNNN format.
+        """Detect US, international, and grouped local phone numbers.
 
-        Parenthesized format is distinctive enough to assign a fixed
-        high confidence without context scoring.
+        International matches require an explicit country-code prefix
+        (+CC or 00CC) and are validated against an E.164-like digit
+        length window to avoid swallowing arbitrary long identifiers.
         """
         results: list[DetectedEntity] = []
-        for match in self._phone.finditer(text):
+        seen_spans: set[tuple[int, int]] = set()
+
+        def append_phone_candidate(candidate: str, start: int, end: int) -> None:
+            normalized_digits = re.sub(r"\D", "", candidate)
+            if candidate.startswith("00"):
+                normalized_digits = normalized_digits[2:]
+
+            if not 9 <= len(normalized_digits) <= 15:
+                return
+
+            span = (start, end)
+            if span in seen_spans:
+                return
+            seen_spans.add(span)
+
             results.append(
                 DetectedEntity(
-                    text=match.group(0),
+                    text=candidate,
                     entity_type="PHONE",
-                    start=match.start(),
-                    end=match.end(),
+                    start=start,
+                    end=end,
                     score=self.phone_score,
                     token="",
                     source="regex",
                 )
             )
+
+        for match in self._phone.finditer(text):
+            append_phone_candidate(match.group(0), match.start(), match.end())
+
+        for match in self._phone_us.finditer(text):
+            append_phone_candidate(match.group(0), match.start(), match.end())
+
+        for match in self._phone_international.finditer(text):
+            candidate = match.group(0).strip()
+            digit_chunks = re.findall(r"\d+", candidate)
+            if len(digit_chunks) < 3:
+                continue
+
+            append_phone_candidate(candidate, match.start(), match.end())
+
+        for match in self._phone_local_grouped.finditer(text):
+            append_phone_candidate(match.group(0), match.start(), match.end())
+
         return results
 
     def _detect_email(self, text: str) -> list[DetectedEntity]:
@@ -476,6 +607,53 @@ class RegexDetector:
                         source="regex",
                     )
                 )
+        return results
+
+    def _detect_date(
+        self,
+        text: str,
+        dob_spans: list[DetectedEntity],
+    ) -> list[DetectedEntity]:
+        """Detect generic calendar dates not already classified as DOB.
+
+        This intentionally covers older years, slash-separated year-first
+        variants, and neutral field labels so the web demo catches simple
+        dates even when birth-date context is absent.
+        """
+        results: list[DetectedEntity] = []
+        occupied_spans = {(entity.start, entity.end) for entity in dob_spans}
+        for match in self._date.finditer(text):
+            span = (match.start(), match.end())
+            if span in occupied_spans:
+                continue
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="DATE",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.date_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
+    def _detect_time(self, text: str) -> list[DetectedEntity]:
+        """Detect clock times and timestamps in common 24-hour formats."""
+        results: list[DetectedEntity] = []
+        for match in self._time.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="TIME",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.time_score,
+                    token="",
+                    source="regex",
+                )
+            )
         return results
 
     def _detect_credit_card(self, text: str) -> list[DetectedEntity]:

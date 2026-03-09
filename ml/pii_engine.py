@@ -44,13 +44,29 @@ MODEL_ID = "dslim/bert-base-NER"
 
 # Entity types where regex is authoritative (deterministic patterns).
 REGEX_AUTHORITATIVE_TYPES: frozenset[str] = frozenset(
-    {"SSN", "PHONE", "EMAIL", "MRN", "DOB", "CREDIT_CARD", "IPV4", "PASSPORT"}
+    {
+        "SSN",
+        "PHONE",
+        "EMAIL",
+        "MRN",
+        "DOB",
+        "DATE",
+        "TIME",
+        "CREDIT_CARD",
+        "IPV4",
+        "PASSPORT",
+    }
 )
 
 # Entity types where the transformer is authoritative (semantic).
 BERT_AUTHORITATIVE_TYPES: frozenset[str] = frozenset(
     {"PERSON", "ORGANIZATION", "LOCATION", "MISC"}
 )
+
+
+def _default_entity_thresholds() -> dict[str, float]:
+    """Return per-entity score thresholds for semantic detections."""
+    return {"MISC": 0.97}
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +196,7 @@ class PIIEngine:
     model_id: str = MODEL_ID
     device: str = "cpu"
     confidence_threshold: float = 0.90
+    entity_thresholds: dict[str, float] = field(default_factory=_default_entity_thresholds)
     aggregation_strategy: str = "simple"
     enable_regex: bool = True
     regex_detector: RegexDetector = field(default_factory=RegexDetector)
@@ -248,8 +265,6 @@ class PIIEngine:
 
         for ent in raw_entities:
             score = float(ent["score"])
-            if score < self.confidence_threshold:
-                continue
 
             # Map model-specific labels to canonical types.
             # IOB2 models: entity_group is PER, LOC, ORG, MISC.
@@ -258,6 +273,10 @@ class PIIEngine:
             if self.label_adapter:
                 raw_label = self.label_adapter.get(raw_label, raw_label)
             entity_type = NER_LABEL_TO_ENTITY.get(raw_label, raw_label)
+
+            threshold = self.entity_thresholds.get(entity_type, self.confidence_threshold)
+            if score < threshold:
+                continue
 
             detected.append(
                 DetectedEntity(

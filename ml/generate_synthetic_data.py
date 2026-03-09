@@ -19,44 +19,30 @@ import argparse
 import json
 import random
 import re
+import sys
+from collections import Counter
 from pathlib import Path
 
 from faker import Faker
+
+_repo_root = str(Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from ml.nemotron_data import (
+    CANONICAL_LABELS,
+    LABEL_TO_ID,
+    build_nemotron_jsonl,
+    load_nemotron_samples,
+    resolve_nemotron_snapshot,
+)
 
 fake = Faker()
 Faker.seed(42)
 random.seed(42)
 
-# BIO label vocabulary — shared with evaluate.py and the model pipeline.
-LABEL_LIST: list[str] = [
-    "O",
-    "B-PER",
-    "I-PER",
-    "B-ORG",
-    "I-ORG",
-    "B-LOC",
-    "I-LOC",
-    "B-SSN",
-    "I-SSN",
-    "B-PHONE",
-    "I-PHONE",
-    "B-EMAIL",
-    "I-EMAIL",
-    "B-MRN",
-    "I-MRN",
-    "B-DOB",
-    "I-DOB",
-    "B-MISC",
-    "I-MISC",
-    "B-CREDIT_CARD",
-    "I-CREDIT_CARD",
-    "B-IPV4",
-    "I-IPV4",
-    "B-PASSPORT",
-    "I-PASSPORT",
-]
-
-LABEL_TO_ID: dict[str, int] = {label: i for i, label in enumerate(LABEL_LIST)}
+# BIO label vocabulary — shared with the Nemotron adapter and model pipeline.
+LABEL_LIST: list[str] = CANONICAL_LABELS
 
 # Nationalities for MISC entity generation. These are the most reliably
 # detected MISC entities from CoNLL-2003 training data.
@@ -110,11 +96,57 @@ def _mrn() -> str:
 
 
 def _phone() -> str:
-    """Generate a US phone number."""
+    """Generate a US phone number in several common display formats."""
     a = random.randint(200, 999)
     b = random.randint(200, 999)
     c = random.randint(1000, 9999)
-    return f"({a}) {b}-{c}"
+    formats = [
+        f"({a}) {b}-{c}",
+        f"{a}-{b}-{c}",
+        f"{a} {b} {c}",
+        f"1-{a}-{b}-{c}",
+    ]
+    return random.choice(formats)
+
+
+def _local_grouped_phone() -> str:
+    """Generate a grouped local phone number with a leading zero."""
+    templates = [
+        (4, 3, 3),
+        (4, 3, 4),
+        (3, 3, 3),
+    ]
+    sizes = random.choice(templates)
+    first = "0" + "".join(str(random.randint(0, 9)) for _ in range(sizes[0] - 1))
+    rest = [
+        "".join(str(random.randint(0, 9)) for _ in range(size))
+        for size in sizes[1:]
+    ]
+    separator = random.choice([" ", "-", "."])
+    return separator.join([first, *rest])
+
+
+def _international_phone() -> str:
+    """Generate an international phone number with a country code prefix."""
+    country_codes = ["+44", "+49", "+61", "+81", "+91", "+995", "00420"]
+    group_templates = [
+        (3, 3, 2, 2),
+        (2, 4, 4),
+        (3, 3, 4),
+        (2, 3, 3, 3),
+    ]
+    prefix = random.choice(country_codes)
+    groups = [
+        str(random.randint(10 ** (size - 1), (10**size) - 1))
+        for size in random.choice(group_templates)
+    ]
+    separator = random.choice([" ", "-", " "])
+    return prefix + separator + separator.join(groups)
+
+
+def _contact_phone() -> str:
+    """Generate a phone number across US, international, and local styles."""
+    return random.choice([_phone, _international_phone, _local_grouped_phone])()
 
 
 def _credit_card(dashed: bool = True) -> str:
@@ -221,7 +253,7 @@ def _enterprise_sample() -> tuple[str, list[tuple[str, str]]]:
     """
     person = fake.name()
     org = fake.company()
-    phone = _phone()
+    phone = _contact_phone()
     email = fake.email()
     location = fake.city()
     misc = random.choice(NATIONALITIES)
@@ -391,7 +423,7 @@ def _financial_sample() -> tuple[str, list[tuple[str, str]]]:
     """
     person = fake.name()
     org = fake.company()
-    phone = _phone()
+    phone = _contact_phone()
 
     dashed_templates = [
         lambda p, o, cc, ph: (
@@ -506,21 +538,198 @@ def _negative_sample() -> tuple[str, list[tuple[str, str]]]:
     return text, entities
 
 
-def generate_dataset(num_samples: int, output_path: Path) -> dict[str, int]:
-    """Generate a mixed synthetic dataset across multiple domains.
+def _international_contact_sample() -> tuple[str, list[tuple[str, str]]]:
+    """Generate positive samples with international phone formats."""
+    person = fake.name()
+    org = fake.company()
+    phone = random.choice([_international_phone, _local_grouped_phone, _phone])()
+    email = fake.email()
+    location = fake.city()
+
+    templates = [
+        lambda p, o, ph, e, loc: (
+            f"Please feel free to contact {p} at {ph} or via email at {e}. {p} works with {o} in {loc}.",
+            [(p, "PER"), (ph, "PHONE"), (e, "EMAIL"), (o, "ORG"), (loc, "LOC")],
+        ),
+        lambda p, o, ph, e, loc: (
+            f"International support callback for {p}: {ph}. Escalation owner is {o}; confirmation sent to {e}.",
+            [(p, "PER"), (ph, "PHONE"), (o, "ORG"), (e, "EMAIL")],
+        ),
+        lambda p, o, ph, e, loc: (
+            f"Reach the regional office in {loc} on {ph}. Account manager {p} from {o} will respond at {e}.",
+            [(loc, "LOC"), (ph, "PHONE"), (p, "PER"), (o, "ORG"), (e, "EMAIL")],
+        ),
+    ]
+
+    template_fn = random.choice(templates)
+    return template_fn(person, org, phone, email, location)
+
+
+def _business_hard_negative_sample() -> tuple[str, list[tuple[str, str]]]:
+    """Generate business-style text that should not be redacted as PII."""
+    teams = [
+        "Government Support Team",
+        "Customer Success Team",
+        "Regional Operations Team",
+        "Platform Enablement Team",
+        "Compliance Review Team",
+        "Service Delivery Team",
+    ]
+    departments = [
+        "Public Services",
+        "Operations",
+        "Engineering",
+        "Customer Support",
+        "Community Outreach",
+    ]
+    projects = [
+        "Q3 readiness review",
+        "service rollout plan",
+        "regional support handbook",
+        "customer care transition",
+        "incident response drill",
+    ]
+    company = fake.company()
+    city = fake.city()
+    team = random.choice(teams)
+    department = random.choice(departments)
+    project = random.choice(projects)
+    generic_date = fake.date_between(start_date="-30d", end_date="+30d").strftime("%m/%d/%Y")
+    generic_time = fake.time(pattern="%H:%M")
+    url = f"https://{fake.domain_name()}/updates/{random.randint(100, 999)}"
+
+    templates = [
+        lambda: (
+            f"Best regards,\n\n{team}.\n{department} Division\n{company}",
+            [],
+        ),
+        lambda: (
+            f"The {team} will review the {project} on {generic_date} at {generic_time}. Notes will be published at {url}.",
+            [],
+        ),
+        lambda: (
+            f"Please route this request to the {department} desk in {city}. The {team} is handling the next update cycle.",
+            [],
+        ),
+        lambda: (
+            f"Meeting summary: {team} coordinated with {department} on the {project}. No customer data was included.",
+            [],
+        ),
+    ]
+
+    return random.choice(templates)()
+
+
+def _transcript_multi_org_sample() -> tuple[str, list[tuple[str, str]]]:
+    """Generate transcript-style samples with one company mentioned early and another later.
+
+    This targets the failure mode where the model anchors on the first company
+    and misses a second organization mentioned later in a conversational Q&A.
+    """
+    person = fake.name()
+    host = fake.first_name()
+    primary_org = fake.company()
+    secondary_org = fake.company()
+    while secondary_org == primary_org:
+        secondary_org = fake.company()
+
+    city = fake.city()
+    country = fake.country()
+    ssn = _ssn()
+    ipv4 = _ipv4()
+    phone = _contact_phone()
+    url = f"https://{fake.domain_name()}/episodes/{random.randint(1000, 9999)}"
+    role = random.choice(
+        [
+            "operations director",
+            "platform lead",
+            "content strategy manager",
+            "engineering lead",
+            "distribution manager",
+        ]
+    )
+    podcast = random.choice(
+        [
+            "The Future of Media",
+            "Signal & Stream",
+            "Digital Frontlines",
+            "The Platform Brief",
+            "Through the Feed",
+        ]
+    )
+
+    templates = [
+        lambda: (
+            f"**Episode Title:** {podcast}\n\n"
+            f"**Guest:** {person}\n\n"
+            f"**Company:** {primary_org}\n\n"
+            f"**Transcript URL:** {url}\n\n"
+            f"**Host:** Today we have {person}, who works at {primary_org}. Welcome!\n\n"
+            f"**{person}:** Thanks for having me. My work at {primary_org} keeps me busy.\n\n"
+            f"**Host:** You previously mentioned partnerships in {city}, {country}.\n\n"
+            f"**{person}:** Yes, and we also review logs like {ipv4} and identifiers such as {ssn}.\n\n"
+            f"**Host:** Separate question: you also consult with {secondary_org}, correct? What is it like working there?",
+            [
+                (person, "PER"),
+                (primary_org, "ORG"),
+                (url, "MISC"),
+                (city, "LOC"),
+                (country, "LOC"),
+                (ipv4, "IPV4"),
+                (ssn, "SSN"),
+                (secondary_org, "ORG"),
+            ],
+        ),
+        lambda: (
+            f"Transcript excerpt:\n"
+            f"Host {host}: We are joined by {person} from {primary_org}.\n"
+            f"{person}: I lead {role} at {primary_org} and work with teams in {city}.\n"
+            f"Host {host}: You referenced support calls to {phone} and incident traffic from {ipv4}.\n"
+            f"{person}: Correct, and some audit records still contain tokens like {ssn}.\n"
+            f"Host {host}: One more thing, you work at {secondary_org} too, right? What's the culture like there?",
+            [
+                (host, "PER"),
+                (person, "PER"),
+                (primary_org, "ORG"),
+                (city, "LOC"),
+                (phone, "PHONE"),
+                (ipv4, "IPV4"),
+                (ssn, "SSN"),
+                (secondary_org, "ORG"),
+            ],
+        ),
+        lambda: (
+            f"Interview Notes\n\n"
+            f"Guest: {person}\n"
+            f"Primary employer: {primary_org}\n"
+            f"Current city: {city}, {country}\n"
+            f"Reference link: {url}\n\n"
+            f"Q: At {primary_org}, what does your team handle?\n"
+            f"A: As {role}, I help operate the platform and review events tagged with addresses like {ipv4}.\n\n"
+            f"Q: We also heard you recently interviewed with {secondary_org}. Is that accurate, and what do you think of the company?\n"
+            f"A: Yes, I spent time speaking with {secondary_org} after a callback at {phone}.",
+            [
+                (person, "PER"),
+                (primary_org, "ORG"),
+                (city, "LOC"),
+                (country, "LOC"),
+                (url, "MISC"),
+                (ipv4, "IPV4"),
+                (secondary_org, "ORG"),
+                (phone, "PHONE"),
+            ],
+        ),
+    ]
+
+    return random.choice(templates)()
+
+
+def generate_synthetic_records(num_samples: int) -> tuple[list[dict], dict[str, int]]:
+    """Generate the existing Faker-based synthetic dataset in memory.
 
     Splits: 40% enterprise, 25% clinical, 15% financial (credit cards),
     10% identity/tech (passport + IPv4), 10% negative (disambiguation).
-
-    Args:
-        num_samples: Total number of samples to generate.
-        output_path: Path to write the JSONL file.
-
-    Returns:
-        Dictionary of entity type counts for the summary.
     """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
     entity_counts: dict[str, int] = {}
     num_enterprise = int(num_samples * 0.40)
     num_clinical = int(num_samples * 0.25)
@@ -557,9 +766,144 @@ def generate_dataset(num_samples: int, output_path: Path) -> dict[str, int]:
 
     random.shuffle(samples)
 
+    return samples, entity_counts
+
+
+def generate_hard_negative_benchmark_records(
+    num_samples: int,
+) -> tuple[list[dict], dict[str, int]]:
+    """Generate a benchmark slice focused on phone recall and business false positives."""
+    samples: list[dict] = []
+    entity_counts: dict[str, int] = {}
+
+    num_business_negative = int(num_samples * 0.50)
+    num_international_contact = int(num_samples * 0.30)
+    num_regular_positive = num_samples - num_business_negative - num_international_contact
+
+    generators = (
+        [(_business_hard_negative_sample, num_business_negative)]
+        + [(_international_contact_sample, num_international_contact)]
+        + [(_enterprise_sample, num_regular_positive)]
+    )
+
+    for gen_fn, count in generators:
+        for _ in range(count):
+            text, entities = gen_fn()
+            tokens, ner_tags = _tokenize_and_label(text, entities)
+            tag_ids = [LABEL_TO_ID.get(tag, 0) for tag in ner_tags]
+            samples.append(
+                {
+                    "tokens": tokens,
+                    "ner_tags": tag_ids,
+                    "ner_tag_labels": ner_tags,
+                }
+            )
+            for _, etype in entities:
+                entity_counts[etype] = entity_counts.get(etype, 0) + 1
+
+    random.shuffle(samples)
+    return samples, entity_counts
+
+
+def generate_transcript_org_records(
+    num_samples: int,
+) -> tuple[list[dict], dict[str, int]]:
+    """Generate transcript-style multi-company training records."""
+    samples: list[dict] = []
+    entity_counts: dict[str, int] = {}
+
+    for _ in range(num_samples):
+        text, entities = _transcript_multi_org_sample()
+        tokens, ner_tags = _tokenize_and_label(text, entities)
+        tag_ids = [LABEL_TO_ID.get(tag, 0) for tag in ner_tags]
+        samples.append(
+            {
+                "tokens": tokens,
+                "ner_tags": tag_ids,
+                "ner_tag_labels": ner_tags,
+            }
+        )
+        for _, etype in entities:
+            entity_counts[etype] = entity_counts.get(etype, 0) + 1
+
+    random.shuffle(samples)
+    return samples, entity_counts
+
+
+def generate_transcript_org_dataset(
+    num_samples: int,
+    output_path: Path,
+) -> dict[str, int]:
+    """Generate transcript-style multi-company training data."""
+    samples, entity_counts = generate_transcript_org_records(num_samples)
+    _write_samples(output_path, samples)
+    return entity_counts
+
+
+def generate_hard_negative_benchmark(
+    num_samples: int,
+    output_path: Path,
+) -> dict[str, int]:
+    """Generate a targeted benchmark with hard-negative business text."""
+    samples, entity_counts = generate_hard_negative_benchmark_records(num_samples)
+    _write_samples(output_path, samples)
+    return entity_counts
+
+
+def _write_samples(output_path: Path, samples: list[dict]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     with open(output_path, "w") as f:
         for sample in samples:
             f.write(json.dumps(sample) + "\n")
+
+
+def generate_dataset(num_samples: int, output_path: Path) -> dict[str, int]:
+    """Generate a mixed Faker-only synthetic dataset."""
+    samples, entity_counts = generate_synthetic_records(num_samples)
+    _write_samples(output_path, samples)
+
+    return entity_counts
+
+
+def generate_hybrid_dataset(
+    num_samples: int,
+    output_path: Path,
+    *,
+    nemotron_dir: str | Path | None = None,
+    nemotron_fraction: float = 0.7,
+    seed: int = 42,
+) -> dict[str, int]:
+    """Generate a training set mixed from Nemotron and local synthetic data."""
+    nemotron_target = max(0, min(num_samples, int(num_samples * nemotron_fraction)))
+    synthetic_target = num_samples - nemotron_target
+
+    samples: list[dict] = []
+    counts: Counter[str] = Counter()
+
+    snapshot = resolve_nemotron_snapshot(nemotron_dir)
+    if snapshot is not None and nemotron_target > 0:
+        nemotron_samples = load_nemotron_samples(
+            snapshot,
+            split="train",
+            limit=nemotron_target,
+            seed=seed,
+        )
+        samples.extend(nemotron_samples)
+        for sample in nemotron_samples:
+            for tag in sample["ner_tag_labels"]:
+                if tag != "O":
+                    counts[tag.split("-", 1)[1]] += 1
+        synthetic_target = num_samples - len(nemotron_samples)
+
+    synthetic_samples, synthetic_counts = generate_synthetic_records(synthetic_target)
+    samples.extend(synthetic_samples)
+    counts.update(synthetic_counts)
+
+    random.Random(seed).shuffle(samples)
+    _write_samples(output_path, samples)
+
+    return dict(counts)
 
     return entity_counts
 
@@ -580,14 +924,51 @@ def main() -> None:
         default="data/synthetic.jsonl",
         help="Output JSONL file path (default: data/synthetic.jsonl)",
     )
+    parser.add_argument(
+        "--source",
+        choices=["synthetic", "nemotron", "hybrid", "hard-negative", "transcript-org"],
+        default="hybrid",
+        help="Dataset source to build (default: hybrid)",
+    )
+    parser.add_argument(
+        "--nemotron-dir",
+        type=str,
+        default=None,
+        help="Optional path to a downloaded Nemotron-PII snapshot",
+    )
+    parser.add_argument(
+        "--nemotron-fraction",
+        type=float,
+        default=0.7,
+        help="Fraction of rows to source from Nemotron in hybrid mode",
+    )
     args = parser.parse_args()
 
     output_path = Path(args.output)
     if not output_path.is_absolute():
         output_path = Path(__file__).parent / output_path
 
-    print(f"Generating {args.num_samples} synthetic NER samples...")
-    entity_counts = generate_dataset(args.num_samples, output_path)
+    print(f"Generating {args.num_samples} NER samples from {args.source} data...")
+    if args.source == "synthetic":
+        entity_counts = generate_dataset(args.num_samples, output_path)
+    elif args.source == "nemotron":
+        entity_counts = build_nemotron_jsonl(
+            output_path,
+            dataset_dir=args.nemotron_dir,
+            split="train",
+            limit=args.num_samples,
+        )
+    elif args.source == "hard-negative":
+        entity_counts = generate_hard_negative_benchmark(args.num_samples, output_path)
+    elif args.source == "transcript-org":
+        entity_counts = generate_transcript_org_dataset(args.num_samples, output_path)
+    else:
+        entity_counts = generate_hybrid_dataset(
+            args.num_samples,
+            output_path,
+            nemotron_dir=args.nemotron_dir,
+            nemotron_fraction=args.nemotron_fraction,
+        )
 
     print(f"\nWrote {args.num_samples} samples to {output_path}")
     print("\nEntity distribution:")
