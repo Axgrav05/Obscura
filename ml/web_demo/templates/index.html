@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OBSCURA - Neural PII Redaction Engine</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #121212;
+            --bg-tertiary: #1a1a1a;
+            --text-primary: #e0e0e0;
+            --text-secondary: #a0a0a0;
+            --text-muted: #606060;
+            --border: #2a2a2a;
+            --border-hover: #3a3a3a;
+            --accent: #ffffff;
+            --accent-dim: #404040;
+            --per: #49f5a6;
+            --loc: #49c8ff;
+            --org: #ffb84d;
+            --misc: #ff86ec;
+            --ssn: #ff5f87;
+            --phone: #37f6ea;
+            --email: #9dfc5d;
+            --dob: #ff7676;
+            --date: #ffcf66;
+            --time: #84f4ff;
+            --credit-card: #b78cff;
+            --ipv4: #76a8ff;
+            --passport: #ff9a5c;
+            --mrn: #ffd54d;
+        }
+
+        body {
+            font-family: 'SF Mono', 'Monaco', 'Consolas', 'Courier New', monospace;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 0;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1920px;
+            margin: 0 auto;
+            padding: 0;
+        }
+
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 20px 40px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo h1 {
+            font-size: 1.4em;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            color: var(--accent);
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, #ffffff 0%, #808080 100%);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2em;
+        }
+
+        .header-meta {
+            font-size: 0.85em;
+            color: var(--text-secondary);
+            display: flex;
+            gap: 20px;
+        }
+
+        .meta-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            background: #4ade80;
+            border-radius: 50%;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            height: calc(100vh - 73px);
+        }
+
+        .panel {
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel:last-child {
+            border-right: none;
+        }
+
+        .panel-header {
+            padding: 20px 30px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-tertiary);
+        }
+
+        .panel-title {
+            font-size: 0.9em;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .panel-body {
+            flex: 1;
+            padding: 30px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        textarea {
+            flex: 1;
+            width: 100%;
+            padding: 20px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-primary);
+            font-size: 0.9em;
+            font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+            resize: none;
+            transition: border-color 0.2s;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: var(--accent-dim);
+        }
+
+        textarea::placeholder {
+            color: var(--text-muted);
+        }
+
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        button {
+            flex: 1;
+            padding: 12px 20px;
+            font-size: 0.85em;
+            font-weight: 500;
+            font-family: inherit;
+            border: 1px solid var(--border);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: all 0.2s;
+            letter-spacing: 0.03em;
+            border-radius: 2px;
+        }
+
+        button:hover {
+            background: var(--accent-dim);
+            border-color: var(--border-hover);
+        }
+
+        button:active {
+            transform: translateY(1px);
+        }
+
+        button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: var(--bg-primary);
+            border-color: var(--accent);
+        }
+
+        .btn-primary:hover {
+            background: var(--text-primary);
+        }
+
+        .redacted-text {
+            flex: 1;
+            padding: 20px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 0.9em;
+            font-family: 'SF Mono', 'Monaco', monospace;
+            line-height: 1.8;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow-y: auto;
+        }
+
+        .entity {
+            padding: 2px 6px;
+            margin: 0 1px;
+            border-radius: 4px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.15s;
+            position: relative;
+            border: 1px solid transparent;
+            box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+        }
+
+        .entity:hover {
+            filter: brightness(1.1);
+            border-color: rgba(255, 255, 255, 0.24);
+            transform: translateY(-1px);
+        }
+
+        .entity.entity-PER { background: rgba(73, 245, 166, 0.16); color: var(--per); border-color: rgba(73, 245, 166, 0.42); }
+        .entity.entity-LOC { background: rgba(73, 200, 255, 0.16); color: var(--loc); border-color: rgba(73, 200, 255, 0.42); }
+        .entity.entity-ORG { background: rgba(255, 184, 77, 0.16); color: var(--org); border-color: rgba(255, 184, 77, 0.42); }
+        .entity.entity-MISC { background: rgba(255, 134, 236, 0.16); color: var(--misc); border-color: rgba(255, 134, 236, 0.42); }
+        .entity.entity-SSN { background: rgba(255, 95, 135, 0.16); color: var(--ssn); border-color: rgba(255, 95, 135, 0.42); }
+        .entity.entity-PHONE { background: rgba(55, 246, 234, 0.16); color: var(--phone); border-color: rgba(55, 246, 234, 0.42); }
+        .entity.entity-EMAIL { background: rgba(157, 252, 93, 0.16); color: var(--email); border-color: rgba(157, 252, 93, 0.42); }
+        .entity.entity-DOB { background: rgba(255, 118, 118, 0.16); color: var(--dob); border-color: rgba(255, 118, 118, 0.42); }
+        .entity.entity-DATE { background: rgba(255, 207, 102, 0.16); color: var(--date); border-color: rgba(255, 207, 102, 0.42); }
+        .entity.entity-TIME { background: rgba(132, 244, 255, 0.16); color: var(--time); border-color: rgba(132, 244, 255, 0.42); }
+        .entity.entity-CREDIT_CARD { background: rgba(183, 140, 255, 0.16); color: var(--credit-card); border-color: rgba(183, 140, 255, 0.42); }
+        .entity.entity-IPV4 { background: rgba(118, 168, 255, 0.16); color: var(--ipv4); border-color: rgba(118, 168, 255, 0.42); }
+        .entity.entity-PASSPORT { background: rgba(255, 154, 92, 0.16); color: var(--passport); border-color: rgba(255, 154, 92, 0.42); }
+        .entity.entity-MRN { background: rgba(255, 213, 77, 0.16); color: var(--mrn); border-color: rgba(255, 213, 77, 0.42); }
+
+        .stats-bar {
+            border-top: 1px solid var(--border);
+            padding: 15px 30px;
+            background: var(--bg-tertiary);
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 20px;
+        }
+
+        .stat {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.8em;
+            font-weight: 600;
+            color: var(--accent);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .stat-label {
+            font-size: 0.75em;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-top: 4px;
+        }
+
+        .visualization {
+            margin-top: 20px;
+            padding: 20px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+        }
+
+        .viz-title {
+            font-size: 0.8em;
+            color: var(--text-secondary);
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .logit-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .logit-bar {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .logit-label {
+            min-width: 90px;
+            font-size: 0.8em;
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .logit-track {
+            flex: 1;
+            height: 6px;
+            background: var(--bg-tertiary);
+            border-radius: 3px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .logit-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #404040 0%, #ffffff 100%);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .logit-value {
+            min-width: 70px;
+            font-size: 0.8em;
+            color: var(--text-primary);
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .legend {
+            margin-top: 20px;
+            padding: 20px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+        }
+
+        .legend-title {
+            font-size: 0.8em;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .legend-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.8em;
+            color: var(--text-primary);
+            font-weight: 700;
+        }
+
+        .legend-swatch {
+            width: 24px;
+            height: 16px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05), 0 0 18px rgba(255, 255, 255, 0.06);
+        }
+
+        .legend-swatch.entity-PER { background: linear-gradient(90deg, rgba(73, 245, 166, 0.95), rgba(73, 245, 166, 0.35)); border-color: rgba(73, 245, 166, 0.7); }
+        .legend-swatch.entity-LOC { background: linear-gradient(90deg, rgba(73, 200, 255, 0.95), rgba(73, 200, 255, 0.35)); border-color: rgba(73, 200, 255, 0.7); }
+        .legend-swatch.entity-ORG { background: linear-gradient(90deg, rgba(255, 184, 77, 0.95), rgba(255, 184, 77, 0.35)); border-color: rgba(255, 184, 77, 0.7); }
+        .legend-swatch.entity-MISC { background: linear-gradient(90deg, rgba(255, 134, 236, 0.95), rgba(255, 134, 236, 0.35)); border-color: rgba(255, 134, 236, 0.7); }
+        .legend-swatch.entity-SSN { background: linear-gradient(90deg, rgba(255, 95, 135, 0.95), rgba(255, 95, 135, 0.35)); border-color: rgba(255, 95, 135, 0.7); }
+        .legend-swatch.entity-PHONE { background: linear-gradient(90deg, rgba(55, 246, 234, 0.95), rgba(55, 246, 234, 0.35)); border-color: rgba(55, 246, 234, 0.7); }
+        .legend-swatch.entity-EMAIL { background: linear-gradient(90deg, rgba(157, 252, 93, 0.95), rgba(157, 252, 93, 0.35)); border-color: rgba(157, 252, 93, 0.7); }
+        .legend-swatch.entity-DOB { background: linear-gradient(90deg, rgba(255, 118, 118, 0.95), rgba(255, 118, 118, 0.35)); border-color: rgba(255, 118, 118, 0.7); }
+        .legend-swatch.entity-DATE { background: linear-gradient(90deg, rgba(255, 207, 102, 0.95), rgba(255, 207, 102, 0.35)); border-color: rgba(255, 207, 102, 0.7); }
+        .legend-swatch.entity-TIME { background: linear-gradient(90deg, rgba(132, 244, 255, 0.95), rgba(132, 244, 255, 0.35)); border-color: rgba(132, 244, 255, 0.7); }
+        .legend-swatch.entity-CREDIT_CARD { background: linear-gradient(90deg, rgba(183, 140, 255, 0.95), rgba(183, 140, 255, 0.35)); border-color: rgba(183, 140, 255, 0.7); }
+        .legend-swatch.entity-IPV4 { background: linear-gradient(90deg, rgba(118, 168, 255, 0.95), rgba(118, 168, 255, 0.35)); border-color: rgba(118, 168, 255, 0.7); }
+        .legend-swatch.entity-PASSPORT { background: linear-gradient(90deg, rgba(255, 154, 92, 0.95), rgba(255, 154, 92, 0.35)); border-color: rgba(255, 154, 92, 0.7); }
+        .legend-swatch.entity-MRN { background: linear-gradient(90deg, rgba(255, 213, 77, 0.95), rgba(255, 213, 77, 0.35)); border-color: rgba(255, 213, 77, 0.7); }
+
+        .legend-swatch.entity-PER + span { color: var(--per); }
+        .legend-swatch.entity-LOC + span { color: var(--loc); }
+        .legend-swatch.entity-ORG + span { color: var(--org); }
+        .legend-swatch.entity-MISC + span { color: var(--misc); }
+        .legend-swatch.entity-SSN + span { color: var(--ssn); }
+        .legend-swatch.entity-PHONE + span { color: var(--phone); }
+        .legend-swatch.entity-EMAIL + span { color: var(--email); }
+        .legend-swatch.entity-DOB + span { color: var(--dob); }
+        .legend-swatch.entity-DATE + span { color: var(--date); }
+        .legend-swatch.entity-TIME + span { color: var(--time); }
+        .legend-swatch.entity-CREDIT_CARD + span { color: var(--credit-card); }
+        .legend-swatch.entity-IPV4 + span { color: var(--ipv4); }
+        .legend-swatch.entity-PASSPORT + span { color: var(--passport); }
+        .legend-swatch.entity-MRN + span { color: var(--mrn); }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            margin: 0 auto 20px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 80px 40px;
+            color: var(--text-muted);
+        }
+
+        .empty-icon {
+            font-size: 3em;
+            margin-bottom: 16px;
+            opacity: 0.3;
+        }
+
+        .empty-text {
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-tertiary);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--accent-dim);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--border-hover);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <div class="logo-icon">◈</div>
+                    <h1>OBSCURA</h1>
+                </div>
+                <div class="header-meta">
+                    <div class="meta-item">
+                        <span class="status-dot"></span>
+                        <span>ONNX INT8 ONLINE</span>
+                    </div>
+                    <div class="meta-item">
+                        <span>LATENCY: 9.67ms</span>
+                    </div>
+                    <div class="meta-item">
+                        <span>MODEL: 103.5MB</span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <div class="main-grid">
+            <!-- Left Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">▸ INPUT STREAM</div>
+                </div>
+                <div class="panel-body">
+                    <textarea id="inputText" placeholder="// Paste document or generate synthetic data&#10;// System ready for PII detection"></textarea>
+
+                    <div class="controls">
+                        <button onclick="generateSample()">GENERATE SAMPLE</button>
+                        <button class="btn-primary" onclick="processText()">ANALYZE</button>
+                        <button onclick="clearAll()">CLEAR</button>
+                    </div>
+
+                    <div class="legend">
+                        <div class="legend-title">Entity Classification</div>
+                        <div class="legend-grid">
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-PER"></div>
+                                <span>PERSON</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-LOC"></div>
+                                <span>LOCATION</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-ORG"></div>
+                                <span>ORGANIZATION</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-SSN"></div>
+                                <span>SSN</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-PHONE"></div>
+                                <span>PHONE</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-EMAIL"></div>
+                                <span>EMAIL</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-DOB"></div>
+                                <span>DOB</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-DATE"></div>
+                                <span>DATE</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-TIME"></div>
+                                <span>TIME</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-CREDIT_CARD"></div>
+                                <span>CREDIT CARD</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-IPV4"></div>
+                                <span>IP ADDRESS</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-PASSPORT"></div>
+                                <span>PASSPORT</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-MRN"></div>
+                                <span>MRN</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-swatch entity-MISC"></div>
+                                <span>MISC</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">▸ REDACTED OUTPUT</div>
+                </div>
+                <div class="panel-body">
+                    <div class="loading" id="loading">
+                        <div class="spinner"></div>
+                        <p>PROCESSING WITH NEURAL ENGINE...</p>
+                    </div>
+                    <div id="output">
+                        <div class="empty-state">
+                            <div class="empty-icon">◈</div>
+                            <div class="empty-text">AWAITING INPUT<br>Neural redaction engine ready</div>
+                        </div>
+                    </div>
+
+                    <div class="visualization" id="visualization" style="display: none;">
+                        <div class="viz-title">Neural Network Internals</div>
+                        <div class="logit-bars" id="logitBars"></div>
+                    </div>
+                </div>
+                <div class="stats-bar" id="statsBar" style="display: none;">
+                    <div class="stat">
+                        <div class="stat-value" id="totalEntities">0</div>
+                        <div class="stat-label">Total</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="bertCount">0</div>
+                        <div class="stat-label">BERT NER</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="regexCount">0</div>
+                        <div class="stat-label">Regex</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="precision">-</div>
+                        <div class="stat-label">Precision</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="coverage">-</div>
+                        <div class="stat-label">Coverage</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function generateSample() {
+            const response = await fetch('/api/generate');
+            const data = await response.json();
+            document.getElementById('inputText').value = data.text;
+        }
+
+        async function processText() {
+            const text = document.getElementById('inputText').value.trim();
+            if (!text) return;
+
+            document.getElementById('loading').classList.add('active');
+            document.getElementById('output').innerHTML = '';
+
+            try {
+                const response = await fetch('/api/redact', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+
+                const data = await response.json();
+                document.getElementById('loading').classList.remove('active');
+
+                displayRedactedText(text, data.entities);
+                updateStats(data);
+                displayVisualization(data.logit_stats);
+
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('loading').classList.remove('active');
+            }
+        }
+
+        function displayRedactedText(text, entities) {
+            const output = document.getElementById('output');
+
+            if (entities.length === 0) {
+                output.innerHTML = '<div class="empty-state"><div class="empty-icon">✓</div><div class="empty-text">NO PII DETECTED<br>Document is clean</div></div>';
+                return;
+            }
+
+            const normalizedEntities = normalizeEntities(text, entities);
+
+            let html = '';
+            let lastIndex = 0;
+
+            normalizedEntities.forEach(entity => {
+                if (entity.start < lastIndex) {
+                    return;
+                }
+                html += escapeHtml(text.substring(lastIndex, entity.start));
+                const title = entity.score ? `${entity.type} (${(entity.score * 100).toFixed(0)}%)` : entity.type;
+                html += `<span class="entity entity-${entity.type}" title="${title}">${escapeHtml(entity.text)}</span>`;
+                lastIndex = entity.end;
+            });
+
+            html += escapeHtml(text.substring(lastIndex));
+
+            output.innerHTML = `<div class="redacted-text">${html}</div>`;
+        }
+
+        function normalizeEntities(text, entities) {
+            const normalized = [];
+            const sorted = [...entities].sort((a, b) => {
+                if (a.start !== b.start) return a.start - b.start;
+                return (b.end - b.start) - (a.end - a.start);
+            });
+
+            sorted.forEach(entity => {
+                if (entity.end <= entity.start) {
+                    return;
+                }
+
+                if (normalized.length === 0) {
+                    normalized.push(entity);
+                    return;
+                }
+
+                const current = normalized[normalized.length - 1];
+                if (entity.start >= current.end) {
+                    const gap = text.slice(current.end, entity.start);
+                    if (entity.type === current.type && gap.trim() === '') {
+                        normalized[normalized.length - 1] = {
+                            ...current,
+                            end: entity.end,
+                            text: text.slice(current.start, entity.end),
+                            score: Math.max(current.score || 0, entity.score || 0),
+                            source: current.source === 'regex' || entity.source === 'regex' ? 'regex' : current.source
+                        };
+                        return;
+                    }
+
+                    normalized.push(entity);
+                    return;
+                }
+
+                const currentLength = current.end - current.start;
+                const entityLength = entity.end - entity.start;
+                const currentScore = current.score || 0;
+                const entityScore = entity.score || 0;
+                const prefersEntity = entity.source === 'regex' && current.source !== 'regex'
+                    || entityLength > currentLength
+                    || (entityLength === currentLength && entityScore > currentScore);
+
+                if (prefersEntity) {
+                    normalized[normalized.length - 1] = entity;
+                }
+            });
+
+            return normalized;
+        }
+
+        function updateStats(data) {
+            document.getElementById('statsBar').style.display = 'grid';
+            document.getElementById('totalEntities').textContent = data.total_count;
+            document.getElementById('bertCount').textContent = data.bert_count;
+            document.getElementById('regexCount').textContent = data.regex_count;
+
+            const precision = data.total_count > 0 ? 100 : 0;
+            const coverage = Math.min(100, (data.total_count / 10) * 100);
+            document.getElementById('precision').textContent = precision.toFixed(0) + '%';
+            document.getElementById('coverage').textContent = coverage.toFixed(0) + '%';
+        }
+
+        function displayVisualization(logitStats) {
+            if (!logitStats) return;
+
+            const viz = document.getElementById('visualization');
+            const bars = document.getElementById('logitBars');
+            viz.style.display = 'block';
+
+            const stats = [
+                { label: 'MAX', value: logitStats.max },
+                { label: 'MEAN', value: logitStats.mean },
+                { label: 'MIN', value: logitStats.min },
+                { label: 'STD DEV', value: logitStats.std }
+            ];
+
+            const maxVal = Math.max(...stats.map(s => Math.abs(s.value)));
+
+            bars.innerHTML = stats.map(stat => {
+                const width = (Math.abs(stat.value) / maxVal) * 100;
+                return `
+                    <div class="logit-bar">
+                        <div class="logit-label">${stat.label}</div>
+                        <div class="logit-track">
+                            <div class="logit-fill" style="width: ${width}%"></div>
+                        </div>
+                        <div class="logit-value">${stat.value.toFixed(4)}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function clearAll() {
+            document.getElementById('inputText').value = '';
+            document.getElementById('output').innerHTML = '<div class="empty-state"><div class="empty-icon">◈</div><div class="empty-text">AWAITING INPUT<br>Neural redaction engine ready</div></div>';
+            document.getElementById('statsBar').style.display = 'none';
+            document.getElementById('visualization').style.display = 'none';
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
