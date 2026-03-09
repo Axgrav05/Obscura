@@ -4,12 +4,15 @@ Deterministic regex-based PII detector for structured entity types.
 Handles detection of:
   - SSN: dashed (XXX-XX-XXXX) and dashless (XXXXXXXXX) formats.
     Dashless uses context-aware scoring to disambiguate from other 9-digit numbers.
-  - PHONE: US format (NNN) NNN-NNNN.
+  - PHONE: US format (NNN) NNN-NNNN and international E.164 (+CC ...).
   - EMAIL: standard user@domain.tld format.
   - MRN: Medical Record Number (MRN-XXXXXXX).
   - DOB: Dates in MM/DD/YYYY or YYYY-MM-DD format.
+    Uses context-aware scoring to disambiguate birth dates from generic dates.
   - CREDIT_CARD: 16-digit credit card numbers (dashed or undashed).
+    Undashed format uses context-aware scoring to reduce false positives.
   - IPV4: IPv4 addresses with 0-255 octet validation.
+  - IPV6: IPv6 addresses — full, zero-compressed (::), and IPv4-mapped (::ffff:).
   - PASSPORT: US passport numbers (1 letter + 8 digits).
 
 Latency budget: entire regex pass must complete in <0.5ms. All patterns
@@ -96,6 +99,78 @@ SSN_NEGATIVE_WORDS: frozenset[str] = frozenset(
     }
 )
 
+# --- DOB Context Scoring Constants ---
+
+# Trigger words that indicate a date is a birth date.
+DOB_TRIGGER_WORDS: frozenset[str] = frozenset(
+    {
+        "dob",
+        "birth",
+        "born",
+        "birthday",
+        "birthdate",
+        "age",
+        "newborn",
+        "neonatal",
+    }
+)
+
+# Two-word phrase providing strong DOB signal.
+DOB_TRIGGER_PHRASES: list[tuple[str, str]] = [
+    ("date", "of"),
+]
+
+# Negative context words — these indicate non-DOB dates.
+DOB_NEGATIVE_WORDS: frozenset[str] = frozenset(
+    {
+        "meeting",
+        "appointment",
+        "scheduled",
+        "deadline",
+        "due",
+        "expires",
+        "expiration",
+        "created",
+        "updated",
+        "filed",
+        "issued",
+        "effective",
+        "invoice",
+        "report",
+    }
+)
+
+# --- Credit Card Context Scoring Constants ---
+
+# Trigger words that indicate a 16-digit string is a credit card.
+CC_TRIGGER_WORDS: frozenset[str] = frozenset(
+    {
+        "visa",
+        "mastercard",
+        "amex",
+        "discover",
+        "card",
+        "credit",
+        "debit",
+        "cc",
+        "pan",
+        "cvv",
+    }
+)
+
+# Negative context words for credit card.
+CC_NEGATIVE_WORDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "identifier",
+        "tracking",
+        "order",
+        "receipt",
+        "routing",
+        "transaction",
+    }
+)
+
 
 @dataclass
 class RegexDetector:
@@ -122,9 +197,13 @@ class RegexDetector:
     phone_score: float = 0.95
     email_score: float = 0.99
     mrn_score: float = 0.99
-    dob_score: float = 0.95
+    dob_base_score: float = 0.50
+    dob_threshold: float = 0.70
     credit_card_score: float = 0.99
+    cc_undashed_base_score: float = 0.50
+    cc_undashed_threshold: float = 0.70
     ipv4_score: float = 0.95
+    ipv6_score: float = 0.95
     passport_score: float = 0.99
     _ssn_dashed: re.Pattern[str] = field(init=False, repr=False)
     _ssn_dashless: re.Pattern[str] = field(init=False, repr=False)
@@ -134,6 +213,7 @@ class RegexDetector:
     _dob: re.Pattern[str] = field(init=False, repr=False)
     _credit_card: re.Pattern[str] = field(init=False, repr=False)
     _ipv4: re.Pattern[str] = field(init=False, repr=False)
+    _ipv6: re.Pattern[str] = field(init=False, repr=False)
     _passport: re.Pattern[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -155,11 +235,20 @@ class RegexDetector:
         # a longer alphanumeric string.
         self._ssn_dashless = re.compile(r"(?<!\w)(\d{9})(?!\w)")
 
-        # US phone: (NNN) NNN-NNNN format. Optional space after closing
-        # paren. Word-char lookahead rejects alpha-adjacent matches
-        # like "(123) 456-7890ABC".
+        # Phone: US (NNN) NNN-NNNN format plus international E.164.
+        # International: +CC followed by 2-6 digit groups separated by
+        # spaces, hyphens, or dots. Parentheses allowed around area code.
+        # E.g.: +44 20 7123 4567, +1-555-010-0293, +49(0)30 123456.
+        # Math expressions like "+1 - 45 = -44" are rejected because the
+        # separator characters (=, *) are not in the allowed set.
         self._phone = re.compile(
-            r"(?<!\w)" r"\(\d{3}\)" r"\s?" r"\d{3}-\d{4}" r"(?!\w)"
+            r"(?<!\w)"
+            r"(?:"
+            r"\(\d{3}\)\s?\d{3}-\d{4}"
+            r"|"
+            r"\+\d{1,3}(?:[\s\-.]?\(?\d{1,4}\)?){2,6}"
+            r")"
+            r"(?!\w)"
         )
 
         # Email: standard user@domain.tld format.
@@ -205,6 +294,38 @@ class RegexDetector:
             r"(?!\w)"
         )
 
+        # IPv6: Handles full expansion, zero-compression (::), and IPv4-mapped
+        # (::ffff:a.b.c.d) forms. The IPv4-mapped alternation is listed first
+        # to prevent the generic :: branch from consuming only the hex portion
+        # of an IPv4-mapped address.
+        #
+        # MAC address rejection: MAC format (aa:bb:cc:dd:ee:ff) has 6 groups
+        # with single colons only. Full IPv6 requires 8 groups (7 colons); all
+        # compressed forms require double-colon (::), which MAC never has.
+        self._ipv6 = re.compile(
+            r"(?<!\w)"
+            r"(?:"
+            # IPv4-mapped: ::ffff:a.b.c.d (or ::a.b.c.d without ffff prefix)
+            r"::(?:ffff(?::0{1,4})?:)?"
+            r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?:\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)){3}"
+            r"|"
+            # Mixed h:h:h:h:h:h:a.b.c.d (6 hex groups + IPv4)
+            r"(?:[0-9a-fA-F]{1,4}:){6}"
+            r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?:\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)){3}"
+            r"|"
+            # Full 8-group: h:h:h:h:h:h:h:h
+            r"(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"
+            r"|"
+            # Left groups + :: + optional right groups (left side non-empty)
+            r"(?:[0-9a-fA-F]{1,4}:){1,6}"
+            r":(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,5})?"
+            r"|"
+            # :: at start + optional right groups (covers ::1, ::db8:1, etc.)
+            r"::(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6})?"
+            r")"
+            r"(?!\w)"
+        )
+
         # US Passport: 1 uppercase letter followed by 8 digits.
         self._passport = re.compile(r"(?<!\w)[A-Z]\d{8}(?!\w)")
 
@@ -231,6 +352,7 @@ class RegexDetector:
         entities.extend(self._detect_dob(text))
         entities.extend(self._detect_credit_card(text))
         entities.extend(self._detect_ipv4(text))
+        entities.extend(self._detect_ipv6(text))
         entities.extend(self._detect_passport(text))
         return entities
 
@@ -379,39 +501,56 @@ class RegexDetector:
     def _detect_dob(self, text: str) -> list[DetectedEntity]:
         """Detect dates of birth in MM/DD/YYYY or YYYY-MM-DD format.
 
-        Strict month (01-12), day (01-31), year (1900-2099) boundaries
-        prevent false positives on arbitrary number sequences.
+        Uses context-aware scoring to disambiguate birth dates from
+        generic dates (e.g., meeting dates, invoice dates). Only dates
+        with sufficient contextual evidence are emitted.
         """
         results: list[DetectedEntity] = []
         for match in self._dob.finditer(text):
-            results.append(
-                DetectedEntity(
-                    text=match.group(0),
-                    entity_type="DOB",
-                    start=match.start(),
-                    end=match.end(),
-                    score=self.dob_score,
-                    token="",
-                    source="regex",
+            m_start, m_end = match.start(), match.end()
+            score = self._score_dob_context(text, m_start, m_end)
+            if score >= self.dob_threshold:
+                results.append(
+                    DetectedEntity(
+                        text=match.group(0),
+                        entity_type="DOB",
+                        start=m_start,
+                        end=m_end,
+                        score=round(score, 4),
+                        token="",
+                        source="regex",
+                    )
                 )
-            )
         return results
 
     def _detect_credit_card(self, text: str) -> list[DetectedEntity]:
         """Detect 16-digit credit card numbers, dashed/spaced or undashed.
 
-        Standard 16-digit formatting. The 16-digit length distinguishes
-        these from 9-digit SSNs without overlap risk.
+        Dashed and spaced formats (e.g. 1234-5678-9012-3456) are
+        distinctive enough to get a fixed high score. Undashed 16-digit
+        strings use context-aware scoring to reduce false positives.
         """
         results: list[DetectedEntity] = []
         for match in self._credit_card.finditer(text):
+            matched_text = match.group(0)
+            m_start, m_end = match.start(), match.end()
+
+            # Dashed/spaced formats are unambiguous — full score.
+            is_undashed = matched_text.isdigit()
+            if is_undashed:
+                score = self._score_cc_context(text, m_start, m_end)
+                if score < self.cc_undashed_threshold:
+                    continue
+            else:
+                score = self.credit_card_score
+
             results.append(
                 DetectedEntity(
-                    text=match.group(0),
+                    text=matched_text,
                     entity_type="CREDIT_CARD",
-                    start=match.start(),
-                    end=match.end(),
-                    score=self.credit_card_score,
+                    start=m_start,
+                    end=m_end,
+                    score=round(score, 4),
                     token="",
                     source="regex",
                 )
@@ -439,6 +578,34 @@ class RegexDetector:
             )
         return results
 
+    def _detect_ipv6(self, text: str) -> list[DetectedEntity]:
+        """Detect IPv6 addresses: full, zero-compressed, and IPv4-mapped forms.
+
+        Handles:
+          - Full 8-group: 2001:0db8:85a3:0000:0000:8a2e:0370:7334
+          - Zero-compressed: 2001:db8::1, ::1
+          - IPv4-mapped: ::ffff:192.0.2.128
+
+        MAC addresses (aa:bb:cc:dd:ee:ff) are rejected because they have
+        6 colon-separated groups with single colons only — the full IPv6
+        form requires 8 groups (7 colons) and all compressed forms require
+        a double-colon (::) that MAC addresses never contain.
+        """
+        results: list[DetectedEntity] = []
+        for match in self._ipv6.finditer(text):
+            results.append(
+                DetectedEntity(
+                    text=match.group(0),
+                    entity_type="IPV6",
+                    start=match.start(),
+                    end=match.end(),
+                    score=self.ipv6_score,
+                    token="",
+                    source="regex",
+                )
+            )
+        return results
+
     def _detect_passport(self, text: str) -> list[DetectedEntity]:
         """Detect US passport numbers (1 uppercase letter + 8 digits).
 
@@ -459,6 +626,87 @@ class RegexDetector:
                 )
             )
         return results
+
+    def _score_dob_context(self, text: str, match_start: int, match_end: int) -> float:
+        """Score a date match based on surrounding context.
+
+        Examines words within self.context_window positions on each side.
+        Only dates near birth-related trigger words cross the threshold.
+
+        score = base (0.50)
+              + 0.40 if trigger word found (e.g., "dob", "birth", "born")
+              + 0.10 if trigger phrase found (e.g., "date of")
+              - 0.35 if negative word found (e.g., "meeting", "scheduled")
+
+        Clamped to [0.0, 1.0]. Only matches above dob_threshold
+        (default 0.70) are emitted.
+        """
+        words_before = text[:match_start].lower().split()
+        words_after = text[match_end:].lower().split()
+
+        context_words = (
+            words_before[-self.context_window :] + words_after[: self.context_window]
+        )
+
+        cleaned = [w.strip("()[]{}:;.,!?#\"'") for w in context_words]
+        cleaned_set = set(cleaned)
+
+        score = self.dob_base_score
+
+        # Positive: trigger words
+        if cleaned_set & DOB_TRIGGER_WORDS:
+            score += 0.40
+
+        # Positive: trigger phrases (bigram check)
+        for w1, w2 in DOB_TRIGGER_PHRASES:
+            for i in range(len(cleaned) - 1):
+                if cleaned[i] == w1 and cleaned[i + 1] == w2:
+                    score += 0.10
+                    break
+            else:
+                continue
+            break
+
+        # Negative: anti-DOB context words
+        if cleaned_set & DOB_NEGATIVE_WORDS:
+            score -= 0.35
+
+        return max(0.0, min(1.0, score))
+
+    def _score_cc_context(self, text: str, match_start: int, match_end: int) -> float:
+        """Score an undashed 16-digit match based on surrounding context.
+
+        Only called for undashed credit card matches. Dashed/spaced
+        formats bypass this and receive the full credit_card_score.
+
+        score = base (0.50)
+              + 0.45 if trigger word found (e.g., "visa", "card", "credit")
+              - 0.35 if negative word found (e.g., "tracking", "order")
+
+        Clamped to [0.0, 1.0]. Only matches above cc_undashed_threshold
+        (default 0.70) are emitted.
+        """
+        words_before = text[:match_start].lower().split()
+        words_after = text[match_end:].lower().split()
+
+        context_words = (
+            words_before[-self.context_window :] + words_after[: self.context_window]
+        )
+
+        cleaned = [w.strip("()[]{}:;.,!?#\"'") for w in context_words]
+        cleaned_set = set(cleaned)
+
+        score = self.cc_undashed_base_score
+
+        # Positive: trigger words
+        if cleaned_set & CC_TRIGGER_WORDS:
+            score += 0.45
+
+        # Negative: anti-CC context words
+        if cleaned_set & CC_NEGATIVE_WORDS:
+            score -= 0.35
+
+        return max(0.0, min(1.0, score))
 
     def _score_dashless_context(
         self, text: str, match_start: int, match_end: int
