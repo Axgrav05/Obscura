@@ -7,6 +7,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use inference::redact::redact;
+use inference::redact::rehydrate;
 use inference::{ModelEnvironment, NerModel};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -88,7 +89,7 @@ async fn handle_request(
 
             let resp_bytes = upstream_resp.bytes().await.unwrap();
 
-            // --- OBS-14d placeholder: rehydrate will go here ---
+            // --- OBS-14d: Rehydrate PII tokens in LLM response ---
             let final_bytes = rehydrate_body(resp_bytes, &mapping);
 
             Ok(response.body(Full::new(final_bytes)).unwrap())
@@ -146,7 +147,7 @@ fn rehydrate_body(
         return bytes;
     };
 
-    Bytes::from(inference::redact::rehydrate(text, mapping).into_bytes())
+    Bytes::from(rehydrate(text, mapping).into_bytes())
 }
 
 #[tokio::main]
