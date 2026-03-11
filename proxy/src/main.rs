@@ -9,13 +9,16 @@ use hyper_util::rt::TokioIo;
 use inference::redact::redact;
 use inference::redact::rehydrate;
 use inference::{ModelEnvironment, NerModel};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use serde_json;
 
 async fn handle_request(
-    mut req: Request<hyper::body::Incoming>,
+    req: Request<hyper::body::Incoming>,
     model: Arc<NerModel>,
+    config: Arc<Config>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.uri().path() == "/health" {
         let response = Response::builder()
@@ -26,7 +29,6 @@ async fn handle_request(
         return Ok(response);
     }
 
-    let config = Config::load_from_file("obscura.toml").unwrap_or_default();
     let upstream_url = config.upstream_url.clone();
 
     // Parse X-Obscura-Skip-Redaction header
@@ -104,33 +106,66 @@ async fn handle_request(
     }
 }
 
+/// Remap a local per-message token (e.g. `[PERSON_1]`) to a globally unique
+/// token using `counters` shared across all messages in the request.
+///
+/// Without this, two messages that each produce `[PERSON_1]` for different
+/// people would collide in the merged mapping — last write would win.
+fn bump_token(local_token: &str, counters: &mut HashMap<String, usize>) -> String {
+    let inner = local_token.trim_start_matches('[').trim_end_matches(']');
+    if let Some(idx) = inner.rfind('_') {
+        let label = &inner[..idx];
+        let count = counters.entry(label.to_string()).or_insert(0);
+        *count += 1;
+        format!("[{}_{}]", label, count)
+    } else {
+        local_token.to_string() // fallback: pass through unchanged
+    }
+}
+
 /// Extract the `messages` content from an OpenAI-style JSON body,
-/// run NER + redaction, and return the redacted bytes + mapping.
+/// run NER + redaction on ALL messages, and return the redacted bytes + mapping.
+///
+/// Tokens are namespaced globally across all messages via `bump_token` to
+/// prevent cross-message token collisions in the merged MappingDictionary.
 fn redact_body(
     body: &Bytes,
     model: &NerModel,
     skipped_entities: &[String],
 ) -> anyhow::Result<(Bytes, inference::mapping::MappingDictionary)> {
     let mut json: serde_json::Value = serde_json::from_slice(body)?;
+    let mut combined_mapping = inference::mapping::MappingDictionary::new();
+    let mut global_counters: HashMap<String, usize> = HashMap::new();
 
     if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
         for message in messages.iter_mut() {
-            if let Some(content) = message.get_mut("content").and_then(|c| c.as_str()) {
-                let content_str = content.to_string();
-                let spans = model.predict(&content_str)?;
-                let (redacted, mapping) = redact(&content_str, spans, skipped_entities)?;
-                *message.get_mut("content").unwrap() = serde_json::Value::String(redacted);
-                // Return after first content field for now (non-streaming, single message)
-                return Ok((Bytes::from(serde_json::to_vec(&json)?), mapping));
+            if let Some(content_val) = message.get_mut("content") {
+                if let Some(content) = content_val.as_str() {
+                    let content_str = content.to_string();
+                    let spans = model.predict(&content_str)?;
+                    let (redacted, msg_mapping) =
+                        redact(&content_str, spans, skipped_entities)?;
+
+                    // Remap local tokens to globally unique tokens so that
+                    // [PERSON_1] from message 0 and [PERSON_1] from message 1
+                    // become [PERSON_1] and [PERSON_2] in the merged mapping.
+                    let mut remapped = redacted;
+                    for (local_token, original) in msg_mapping.mappings {
+                        let global_token = bump_token(&local_token, &mut global_counters);
+                        remapped = remapped.replace(&local_token, &global_token);
+                        combined_mapping.insert(global_token, original);
+                    }
+
+                    *content_val = serde_json::Value::String(remapped);
+                }
             }
         }
+        return Ok((Bytes::from(serde_json::to_vec(&json)?), combined_mapping));
     }
 
-    // Non-chat body: pass through unchanged with empty mapping
-    Ok((
-        body.clone(),
-        inference::mapping::MappingDictionary::new(),
-    ))
+    // Unknown schema — fail closed: block rather than forward PII unredacted.
+    // Covers non-chat formats like {"prompt": "..."} that don't have a "messages" array.
+    anyhow::bail!("Unrecognised request schema: no 'messages' array found")
 }
 
 /// OBS-14d: Find-replace mapping tokens in the LLM response with original values.
@@ -154,10 +189,11 @@ fn rehydrate_body(
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config = Config::load_from_file("obscura.toml").unwrap_or_else(|e| {
+    // Load config once at startup — passed as Arc<Config> to each request handler.
+    let config = Arc::new(Config::load_from_file("obscura.toml").unwrap_or_else(|e| {
         tracing::warn!("Failed to load obscura.toml, using defaults: {}", e);
         Config::default()
-    });
+    }));
 
     let model_env = ModelEnvironment::load()
         .expect("Failed to load model environment (fail-closed)");
@@ -174,11 +210,14 @@ async fn main() -> anyhow::Result<()> {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let model = Arc::clone(&model);
+        let config = Arc::clone(&config);
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
                 .serve_connection(
                     io,
-                    service_fn(move |req| handle_request(req, Arc::clone(&model))),
+                    service_fn(move |req| {
+                        handle_request(req, Arc::clone(&model), Arc::clone(&config))
+                    }),
                 )
                 .await
             {

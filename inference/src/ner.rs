@@ -1,11 +1,18 @@
 use anyhow::Context;
-use ndarray::{Array2, Axis};
-use ort::inputs;
+use ndarray::Array2;
+use ort::{inputs, value::TensorRef};
 
 use crate::NerModel;
 
 const CONFIDENCE_THRESHOLD: f32 = 0.90;
-const MAX_SEQ_LEN: usize = 512;
+
+/// Tokens per inference chunk — matches BERT's 512-token window.
+const CHUNK_SIZE: usize = 512;
+
+/// Stride overlap between consecutive chunks (in tokens).
+/// Ensures entities near chunk boundaries are captured by both chunks
+/// so the deduplication step can discard the duplicate.
+const STRIDE: usize = 50;
 
 /// A detected entity span with its label and position in the original text.
 #[derive(Debug, Clone)]
@@ -27,58 +34,69 @@ static LABEL_MAP: &[&str] = &[
 ];
 
 impl NerModel {
-    /// Run NER inference on a piece of text.
-    /// Returns a list of entity spans sorted by start offset.
-    pub fn predict(&self, text: &str) -> anyhow::Result<Vec<EntitySpan>> {
-        // --- Tokenize ---
-        let encoding = self
-            .tokenizer
-            .encode(text, false)
-            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
-
-        let ids = encoding.get_ids();
-        let mask = encoding.get_attention_mask();
-        let offsets = encoding.get_offsets(); // (char_start, char_end) per token
-
-        // Truncate to MAX_SEQ_LEN
-        let seq_len = ids.len().min(MAX_SEQ_LEN);
+    /// Run NER on a single token-level chunk.
+    ///
+    /// `ids`, `mask`, and `offsets` are slices from the full encoding.
+    /// `offsets` contains global character positions (from the full-text
+    /// encoding), so no re-mapping is needed after chunking.
+    fn run_chunk(
+        &self,
+        text: &str,
+        ids: &[u32],
+        mask: &[u32],
+        offsets: &[(usize, usize)],
+    ) -> anyhow::Result<Vec<EntitySpan>> {
+        let seq_len = ids.len();
 
         // Build input tensors: shape [1, seq_len]
+        // ort v2: TensorArrayData is implemented for &Array2<i64> (reference to owned),
+        // not for Array2::view() (ViewRepr). Pass &array, not array.view().
         let input_ids: Array2<i64> = Array2::from_shape_vec(
             (1, seq_len),
-            ids[..seq_len].iter().map(|&x| x as i64).collect(),
+            ids.iter().map(|&x| x as i64).collect(),
         )
         .context("Failed to build input_ids tensor")?;
 
         let attention_mask: Array2<i64> = Array2::from_shape_vec(
             (1, seq_len),
-            mask[..seq_len].iter().map(|&x| x as i64).collect(),
+            mask.iter().map(|&x| x as i64).collect(),
         )
         .context("Failed to build attention_mask tensor")?;
 
         // --- Run inference ---
-        let outputs = self
-            .session
+        // ort v2: Session::run() requires &mut self — lock the Mutex for this call.
+        // The guard must be bound to a let so it outlives the outputs borrow.
+        // inputs! macro returns Vec (not Result) — no ? on the macro itself.
+        // TensorRef::from_array_view takes &Array2 (reference to owned array).
+        let mut session_guard = self.session.lock().unwrap();
+        let outputs = session_guard
             .run(inputs![
-                "input_ids" => input_ids.view(),
-                "attention_mask" => attention_mask.view()
-            ]?)
+                "input_ids" => TensorRef::<i64>::from_array_view(&input_ids)
+                    .context("Failed to create input_ids TensorRef")?,
+                "attention_mask" => TensorRef::<i64>::from_array_view(&attention_mask)
+                    .context("Failed to create attention_mask TensorRef")?
+            ])
             .context("ORT session run failed")?;
 
-        // logits shape: [1, seq_len, num_labels]
-        let logits = outputs["logits"]
+        // ort v2.0.0-rc.12: try_extract_tensor returns (&Shape, &[T]) where
+        // Shape = Vec<i64>. Logits layout: [1, seq_len, num_labels] (row-major).
+        let (shape, data) = outputs["logits"]
             .try_extract_tensor::<f32>()
             .context("Failed to extract logits tensor")?;
+
+        let num_labels = shape[2] as usize;
 
         // --- Decode: argmax + confidence filter + BIO assembly ---
         let mut spans: Vec<EntitySpan> = Vec::new();
         let mut current: Option<(String, usize, usize)> = None; // (label, start, end)
 
-        let token_logits = logits.index_axis(Axis(0), 0); // shape [seq_len, num_labels]
+        for i in 0..seq_len {
+            // Slice this token's scores from the flat row-major layout.
+            // data index: [0, i, :] = data[i * num_labels .. (i+1) * num_labels]
+            let token_scores: &[f32] = &data[i * num_labels..(i + 1) * num_labels];
 
-        for (i, token_scores) in token_logits.outer_iter().enumerate() {
-            // Softmax
-            let max_val = token_scores.fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+            // Softmax — use total_cmp to avoid panic on NaN logits (stable since Rust 1.62).
+            let max_val: f32 = token_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let exps: Vec<f32> = token_scores.iter().map(|&x| (x - max_val).exp()).collect();
             let sum: f32 = exps.iter().sum();
             let probs: Vec<f32> = exps.iter().map(|x| x / sum).collect();
@@ -86,8 +104,8 @@ impl NerModel {
             let (best_idx, &confidence) = probs
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                .unwrap();
+                .max_by(|(_, a): &(_, &f32), (_, b): &(_, &f32)| a.total_cmp(b))
+                .unwrap(); // safe: probs is non-empty and finite after softmax
 
             let label = LABEL_MAP.get(best_idx).copied().unwrap_or("O");
 
@@ -139,7 +157,72 @@ impl NerModel {
             });
         }
 
-        spans.sort_by_key(|s| s.start);
         Ok(spans)
+    }
+
+    /// Run NER inference on a piece of text.
+    ///
+    /// For texts that tokenize to ≤ 512 tokens, a single inference pass is
+    /// used. For longer texts, the token sequence is split into overlapping
+    /// chunks of CHUNK_SIZE with a STRIDE-token overlap. Spans from the
+    /// overlap zone are deduplicated by a greedy cursor (first accepted wins).
+    ///
+    /// Returns entity spans sorted by start offset.
+    pub fn predict(&self, text: &str) -> anyhow::Result<Vec<EntitySpan>> {
+        // --- Tokenize the full text once ---
+        let encoding = self
+            .tokenizer
+            .encode(text, false)
+            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+
+        let ids = encoding.get_ids();
+        let mask = encoding.get_attention_mask();
+        // offsets contains (global_char_start, global_char_end) per token —
+        // already relative to the full text, so no re-mapping after chunking.
+        let offsets = encoding.get_offsets();
+
+        // Fast path: fits in one chunk — no splitting overhead.
+        if ids.len() <= CHUNK_SIZE {
+            let mut spans = self.run_chunk(text, ids, mask, offsets)?;
+            spans.sort_by_key(|s| s.start);
+            return Ok(spans);
+        }
+
+        // Multi-chunk path: stride loop over the full token sequence.
+        let mut all_spans: Vec<EntitySpan> = Vec::new();
+        let mut chunk_start = 0;
+
+        loop {
+            let chunk_end = (chunk_start + CHUNK_SIZE).min(ids.len());
+            let chunk_spans = self.run_chunk(
+                text,
+                &ids[chunk_start..chunk_end],
+                &mask[chunk_start..chunk_end],
+                &offsets[chunk_start..chunk_end],
+            )?;
+            all_spans.extend(chunk_spans);
+
+            if chunk_end == ids.len() {
+                break;
+            }
+            chunk_start += CHUNK_SIZE - STRIDE;
+        }
+
+        // Deduplicate spans from stride overlap: sort by start ascending, end descending.
+        // End-descending ensures that if a partial entity from chunk N and a full entity
+        // from chunk N+1 share the same start offset, the longer (full) span sorts first
+        // and the greedy cursor accepts it — preventing the partial span from leaking the
+        // tail of the entity to the LLM.
+        all_spans.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+        let mut deduped: Vec<EntitySpan> = Vec::new();
+        let mut cursor = 0usize;
+        for span in all_spans {
+            if span.start >= cursor {
+                cursor = span.end;
+                deduped.push(span);
+            }
+        }
+
+        Ok(deduped)
     }
 }

@@ -1,9 +1,9 @@
 use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::Mutex;
 
 use anyhow::Context;
-use ort::{Environment, ExecutionProvider, Session, SessionBuilder};
+use ort::session::Session;
 use tokenizers::Tokenizer;
 
 pub mod mapping;
@@ -48,28 +48,26 @@ impl ModelEnvironment {
 }
 
 pub struct NerModel {
-    pub session: Session,
+    /// ort v2: Session::run() requires &mut self.
+    /// Wrapped in Mutex for interior mutability so NerModel is shareable via Arc.
+    pub session: Mutex<Session>,
     pub tokenizer: Tokenizer,
 }
 
 impl NerModel {
     pub fn load(env: &ModelEnvironment) -> anyhow::Result<Self> {
-        let ort_env = Arc::new(
-            Environment::builder()
-                .with_name("obscura_ner")
-                .with_execution_providers([ExecutionProvider::CPU(Default::default())])
-                .build()
-                .context("Failed to build ORT environment")?,
-        );
-
-        let session = SessionBuilder::new(&ort_env)
+        // ort v2 API: no Environment — Session::builder() is the entry point.
+        let session = Session::builder()
             .context("Failed to create ORT session builder")?
-            .with_model_from_file(&env.model_path)
+            .commit_from_file(&env.model_path)
             .context("Failed to load ONNX model")?;
 
         let tokenizer = Tokenizer::from_file(&env.tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        Ok(Self { session, tokenizer })
+        Ok(Self {
+            session: Mutex::new(session),
+            tokenizer,
+        })
     }
 }
