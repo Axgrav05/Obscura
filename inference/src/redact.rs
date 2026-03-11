@@ -87,3 +87,19 @@ pub fn redact(
 
     Ok((output, mapping))
 }
+
+/// Restore original PII values in a response body by replacing tokens.
+/// Operates on raw bytes; assumes UTF-8 text (JSON response from LLM).
+pub fn rehydrate(text: &str, mapping: &MappingDictionary) -> String {
+    let mut output = text.to_string();
+    // Iterate in insertion order — HashMap doesn't guarantee order, so sort
+    // by token length descending to avoid partial replacements
+    // (e.g. [PER_1] being replaced inside [PER_10])
+    let mut entries: Vec<(&String, &String)> = mapping.mappings.iter().collect();
+    entries.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+    for (token, original) in entries {
+        output = output.replace(token.as_str(), original.as_str());
+    }
+    output
+}
