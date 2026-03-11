@@ -8,6 +8,7 @@ use tokenizers::Tokenizer;
 
 pub mod mapping;
 pub mod ner;
+pub mod redact;
 
 #[derive(Debug)]
 pub struct ModelEnvironment {
