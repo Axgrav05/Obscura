@@ -7,6 +7,7 @@ use ort::{Environment, ExecutionProvider, Session, SessionBuilder};
 use tokenizers::Tokenizer;
 
 pub mod mapping;
+pub mod ner;
 
 #[derive(Debug)]
 pub struct ModelEnvironment {
