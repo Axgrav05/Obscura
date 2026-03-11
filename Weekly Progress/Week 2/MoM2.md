@@ -1,19 +1,19 @@
-# Meeting Notes:
+# Meeting Minutes - Week 2
+## Action Items
+- [ ] Lead: Refactor the project specification document to reflect the middleware pivot.
 
-## To-Do:
-- Refine project spec
-- Finalize AI Tools(Done) -> No standard AI stack, using anything we have access to (ChatGPT, Gemini, Claude)
-- Align AI tech stack across the team (above)
-- Solidifying approach using AWS EC2 (kyle)
+- [ ] Kyle: Finalize the transition to AWS EC2 for the core hosting environment.
 
-## Notes:
-- Moving away from OCI bc limits the target audience (can only work alongside other OCI apps)
-- Testing 4 different BERT models, establishing baseline F1 score -> Testing the smallest model first to see if viable (if viable, reduces latency and RAM)
-- Establish a high-level architecture diagram for reference
+- [ ] Team: Align internal AI workflows (ChatGPT, Gemini, Claude) for development tasks.
 
-## Status Report:
-- Arjun:
-- Kyle:
-- Bigan:
-- Eduardo:
-- 
+- [ ] Lead: Finalize the architecture diagram for team reference.
+
+## Key Discussion Points
+- Infrastructure Pivot: Formally transitioned development from OCI to AWS EC2. This change ensures Obscura can support a wider target audience by not being restricted to OCI-specific environments.
+
+- AI Engine Optimization: The team is currently benchmarking 4 distinct BERT models.
+
+- Performance Goals: Establishing an F1 score baseline and testing small-scale models first to minimize RAM usage and latency.
+
+## Risks and Blockers
+- Hardware Constraints: Monitoring RAM and latency impact during the initial BERT model tests to ensure compatibility with standard cloud instances.

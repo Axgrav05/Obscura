@@ -1,0 +1,33 @@
+# Obscura configuration (local/dev defaults)
+# NOTE: In production, most secrets should come from environment variables.
+
+[app]
+# Environment name: dev | staging | prod
+env = "dev"
+# Address the server binds to
+host = "0.0.0.0"
+# Port the server listens on
+port = 8080
+# Enable extra logging
+debug = true
+
+[llm]
+# Provider: "openai" | "gemini" | "mock"
+provider = "mock"
+# Model name (varies by provider)
+model = "gpt-4.1-mini"
+# Max tokens for response generation
+max_output_tokens = 512
+# Temperature controls randomness (0.0 = deterministic)
+temperature = 0.3
+# Stream responses (server-sent events / chunked)
+stream = true
+
+[pii]
+# Token format example: <EMAIL_1>, <NAME_2>, etc.
+token_prefix = "<"
+token_suffix = ">"
+# Where to store token maps: "memory" (dev) | "redis" (later)
+mapping_store = "memory"
+# If true, rejects responses that appear to leak raw PII
+enable_leak_checks = false

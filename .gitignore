@@ -1,1 +1,56 @@
+# ===============================
+# Rust
+# ===============================
 /target
+
+# (NOTE: Keep Cargo.lock if this becomes an application.
+# Remove this ignore if the team wants Cargo.lock committed.)
+
+# ===============================
+# macOS
+# ===============================
+.DS_Store
+
+# ===============================
+# Environment files
+# ===============================
+.env
+.env.*
+*.local
+
+# ===============================
+# Python / ML
+# ===============================
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.ruff_cache/
+
+# Model artifacts (never commit weights or exported model directories)
+*.onnx
+*.bin
+*.pt
+*.safetensors
+ml/models/
+
+# Benchmark results (local, timestamped)
+ml/results/
+
+# ===============================
+# IDE / Editor
+# ===============================
+.vscode/
+.idea/
+
+# ===============================
+# Logs
+# ===============================
+*.log
+
+# ===============================
+# AI Assistant Artifacts
+# ===============================
+.claude/
+[cC][lL][aA][uU][dD][eE].md
+.context/
