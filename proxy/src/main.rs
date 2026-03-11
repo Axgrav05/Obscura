@@ -132,12 +132,21 @@ fn redact_body(
     ))
 }
 
-/// OBS-14d stub: will do find-replace of tokens → original values.
+/// OBS-14d: Find-replace mapping tokens in the LLM response with original values.
 fn rehydrate_body(
     bytes: Bytes,
-    _mapping: &inference::mapping::MappingDictionary,
+    mapping: &inference::mapping::MappingDictionary,
 ) -> Bytes {
-    bytes
+    if mapping.mappings.is_empty() {
+        return bytes;
+    }
+
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        tracing::warn!("Response body is not valid UTF-8, skipping rehydration");
+        return bytes;
+    };
+
+    Bytes::from(inference::redact::rehydrate(text, mapping).into_bytes())
 }
 
 #[tokio::main]
