@@ -6,13 +6,15 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use inference::ModelEnvironment;
+use inference::redact::redact;
+use inference::{ModelEnvironment, NerModel};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
-#[allow(clippy::collapsible_if)]
 async fn handle_request(
     mut req: Request<hyper::body::Incoming>,
+    model: Arc<NerModel>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.uri().path() == "/health" {
         let response = Response::builder()
@@ -25,45 +27,71 @@ async fn handle_request(
 
     let config = Config::load_from_file("obscura.toml").unwrap_or_default();
     let upstream_url = config.upstream_url.clone();
-    
-    // OBS-7e: Parse X-Obscura-Skip-Redaction
+
+    // Parse X-Obscura-Skip-Redaction header
     let mut skipped_entities: Vec<String> = config.disabled_entities.clone();
     if let Some(skip_header) = req.headers().get("X-Obscura-Skip-Redaction") {
         if let Ok(skip_str) = skip_header.to_str() {
-            let overrides: Vec<String> = skip_str.split(',').map(|s| s.trim().to_string()).collect();
+            let overrides: Vec<String> =
+                skip_str.split(',').map(|s| s.trim().to_string()).collect();
             skipped_entities.extend(overrides);
         }
     }
-    
+
     // Build upstream URI
-    let uri_string = format!("{}{}", upstream_url, req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or(""));
-    let uri = uri_string.parse::<hyper::Uri>().unwrap();
-    *req.uri_mut() = uri;
+    let uri_string = format!(
+        "{}{}",
+        upstream_url,
+        req.uri()
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("")
+    );
 
     let client = reqwest::Client::new();
     let mut req_builder = client.request(req.method().clone(), uri_string.clone());
-    
-    // Forward headers
+
+    // Forward headers (drop Host)
     for (key, value) in req.headers().iter() {
         if key != hyper::header::HOST {
             req_builder = req_builder.header(key, value);
         }
     }
 
-    // Pass through OBS-7
-    let body_bytes = http_body_util::BodyExt::collect(req.into_body()).await.unwrap().to_bytes();
-    req_builder = req_builder.body(body_bytes);
+    // Collect body bytes
+    let body_bytes = http_body_util::BodyExt::collect(req.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+
+    // --- OBS-14c: Redact PII from request body before forwarding ---
+    let (redacted_body, mapping) = match redact_body(&body_bytes, &model, &skipped_entities) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!("Redaction failed, blocking request (fail-closed): {}", e);
+            return Ok(Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Full::new(Bytes::from("Redaction error")))
+                .unwrap());
+        }
+    };
+
+    req_builder = req_builder.body(redacted_body.clone());
 
     match req_builder.send().await {
         Ok(upstream_resp) => {
             let mut response = Response::builder().status(upstream_resp.status());
-            
+
             for (key, value) in upstream_resp.headers().iter() {
                 response = response.header(key, value);
             }
-            
-            let bytes = upstream_resp.bytes().await.unwrap();
-            Ok(response.body(Full::new(bytes)).unwrap())
+
+            let resp_bytes = upstream_resp.bytes().await.unwrap();
+
+            // --- OBS-14d placeholder: rehydrate will go here ---
+            let final_bytes = rehydrate_body(resp_bytes, &mapping);
+
+            Ok(response.body(Full::new(final_bytes)).unwrap())
         }
         Err(e) => {
             tracing::error!("Upstream request failed: {}", e);
@@ -75,17 +103,58 @@ async fn handle_request(
     }
 }
 
+/// Extract the `messages` content from an OpenAI-style JSON body,
+/// run NER + redaction, and return the redacted bytes + mapping.
+fn redact_body(
+    body: &Bytes,
+    model: &NerModel,
+    skipped_entities: &[String],
+) -> anyhow::Result<(Bytes, inference::mapping::MappingDictionary)> {
+    let mut json: serde_json::Value = serde_json::from_slice(body)?;
+
+    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for message in messages.iter_mut() {
+            if let Some(content) = message.get_mut("content").and_then(|c| c.as_str()) {
+                let content_str = content.to_string();
+                let spans = model.predict(&content_str)?;
+                let (redacted, mapping) = redact(&content_str, spans, skipped_entities)?;
+                *message.get_mut("content").unwrap() = serde_json::Value::String(redacted);
+                // Return after first content field for now (non-streaming, single message)
+                return Ok((Bytes::from(serde_json::to_vec(&json)?), mapping));
+            }
+        }
+    }
+
+    // Non-chat body: pass through unchanged with empty mapping
+    Ok((
+        body.clone(),
+        inference::mapping::MappingDictionary::new(),
+    ))
+}
+
+/// OBS-14d stub: will do find-replace of tokens → original values.
+fn rehydrate_body(
+    bytes: Bytes,
+    _mapping: &inference::mapping::MappingDictionary,
+) -> Bytes {
+    bytes
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let _config = Config::load_from_file("obscura.toml").unwrap_or_else(|e| {
-        tracing::warn!("Failed to load obscura.toml config, using defaults: {}", e);
+    let config = Config::load_from_file("obscura.toml").unwrap_or_else(|e| {
+        tracing::warn!("Failed to load obscura.toml, using defaults: {}", e);
         Config::default()
     });
 
-    let _model_env = ModelEnvironment::load()
-        .expect("Failed to load model environment, crashing on startup (Fail-Closed policy)");
+    let model_env = ModelEnvironment::load()
+        .expect("Failed to load model environment (fail-closed)");
+
+    let model = Arc::new(
+        NerModel::load(&model_env).expect("Failed to load NER model (fail-closed)"),
+    );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     let listener = TcpListener::bind(addr).await?;
@@ -94,9 +163,13 @@ async fn main() -> anyhow::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
+        let model = Arc::clone(&model);
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
-                .serve_connection(io, service_fn(handle_request))
+                .serve_connection(
+                    io,
+                    service_fn(move |req| handle_request(req, Arc::clone(&model))),
+                )
                 .await
             {
                 tracing::error!("Error serving connection: {:?}", err);
