@@ -1,0 +1,136 @@
+# OBS-18: Security Review of Midterm Deployment
+
+## Scope
+This audit reviewed the local midterm deployment from a security perspective, focusing on log safety, repository secret hygiene, environment-file handling, and EC2 deployment security expectations. Local testing was performed using synthetic PII only.
+
+---
+
+## OBS-18a / OBS-18c / OBS-18d – Verified Local Security Checks
+
+### 1. Docker Logs / PII Leakage Review
+A local end-to-end demo test was executed using the OBS-16 demo flow with synthetic PII. After the test run, Docker logs were reviewed and searched for the synthetic name, email, phone number, SSN, and address values used in the request.
+
+#### What was checked
+- Docker container logs after local test execution
+- Presence of synthetic PII values in logs
+- Whether logs appeared operational only or included request-body content
+
+#### Result
+No evidence of raw synthetic PII leakage was observed in the reviewed Docker logs during the local end-to-end test run. The observed logs were operational in nature, such as startup messages and proxy/runtime status messages, and did not include the searched synthetic values.
+
+#### Conclusion
+Based on the reviewed log sample, the local deployment did not show obvious raw synthetic PII leakage in Docker logs.
+
+> Note: This does not prove that all possible code paths are free of leakage. It means no evidence of leakage was observed in the specific reviewed local test run.
+
+---
+
+### 2. Environment File Handling
+The repository was checked to determine whether environment-style files appeared to be committed and whether ignore rules were present to help prevent accidental commits.
+
+#### What was checked
+- Whether `.env`-style files appeared in Git-tracked files
+- Whether `.gitignore` included explicit protections for local environment files
+
+#### Result
+No tracked `.env` files were observed in the local repository file check. However, the reviewed `.gitignore` file appeared minimal and did not show explicit `.env` or `.env.*` ignore entries in the checked copy.
+
+#### Conclusion
+Based on the checks completed, no tracked `.env` files were observed. However, explicit ignore protections for `.env`-style files were not confirmed in the reviewed `.gitignore`, so adding entries such as `.env`, `.env.*`, and `*.local` would be a reasonable hardening step if those files may be used during development or deployment.
+
+---
+
+### 3. Hardcoded Secret Scan
+A repo-wide keyword scan was run to look for common signs of hardcoded secrets in the reviewed project files. The goal of this check was to identify obvious cases where credentials, tokens, keys, or private key material may have been placed directly into source code or configuration files.
+
+#### What was checked
+The scan recursively reviewed project files while excluding common generated or noisy directories such as:
+- `.git`
+- `.venv`
+- `target`
+- `node_modules`
+- `__pycache__`
+
+The scan looked for common indicators including:
+- project secret variable names such as `OBSCURA_API_KEY` and `UPSTREAM_LLM_KEY`
+- generic credential names such as `API_KEY`, `SECRET_KEY`, and `ACCESS_KEY`
+- private key markers such as `BEGIN PRIVATE KEY` and `BEGIN RSA PRIVATE KEY`
+- cloud credential indicators such as `AKIA`
+- common assignment patterns such as `password=` and `token=`
+
+#### Result
+The keyword scan returned no matches in the reviewed project files after excluding the generated/noisy directories listed above.
+
+#### Conclusion
+No obvious hardcoded secrets were found in the reviewed project files based on the keyword scan performed.
+
+> Note: A keyword scan improves confidence but does not guarantee that no secrets exist. Secrets stored in unusual formats, encoded values, or names that do not match the scan patterns may not be detected by this method.
+
+---
+
+### 4. Overall Local Security Assessment
+Based on the local checks completed:
+- No evidence of raw synthetic PII leakage was observed in reviewed Docker logs
+- No tracked `.env` files were observed in the repository file checks completed
+- Explicit `.env` ignore protections were not confirmed in the reviewed `.gitignore`
+- No obvious hardcoded secrets were found in the reviewed project files based on the keyword scan performed
+
+#### Local Security Conclusion
+The local deployment appears acceptable from a basic logging and repository-hygiene perspective for the midterm demo environment. A reasonable follow-up improvement would be to add explicit `.env` protections to `.gitignore` if those files may be used in development or deployment.
+
+---
+
+## OBS-18b – EC2 Security Group Review
+
+### Status
+**Pending direct verification**
+
+At the time of this audit, direct access to the EC2 environment and/or AWS security group configuration was not available. Because of that, this section documents the expected best-practice review criteria and remains pending confirmation against the actual deployment.
+
+### Best-Practice Review Criteria
+When EC2 access or screenshots become available, the following should be verified:
+
+#### Inbound Rules
+- Only required ports are open
+- SSH should be restricted to a trusted IP, VPN range, or team network
+- SSH should **not** be open to `0.0.0.0/0` unless there is a very strong temporary reason
+- Application ports should only be publicly exposed if required for the demo
+- Unused ports should remain closed
+
+#### Outbound Rules
+- Outbound access should be limited where practical
+- If broad outbound access is temporarily allowed for development, this should be documented and reviewed later
+
+#### Public Accessibility
+- If the service must be public for the demo, only the intended application port should be exposed
+- Public exposure should be minimized to the smallest necessary footprint
+
+#### Instance Hygiene
+- Secrets should not be hardcoded on the instance
+- Runtime secrets should come from environment variables, secret stores, or deployment tooling
+- Access to the instance should be limited to authorized team members
+
+### Preliminary EC2 Risk Statement
+Because the EC2 environment was not directly reviewed, this audit cannot yet confirm whether the deployed AWS security group configuration follows least-privilege best practices.
+
+### Placeholder for Final EC2 Verification
+**To be updated once EC2 access, AWS CLI output, or security group screenshots are available.**
+
+- Inbound rules reviewed: ____________________
+- Outbound rules reviewed: ____________________
+- SSH exposure acceptable: ____________________
+- Public application exposure acceptable: ____________________
+- Final EC2 security assessment: ____________________
+
+---
+
+## Final Audit Summary
+This audit completed the local portions of the midterm deployment security review and found no immediate issues in the reviewed Docker logs or keyword-based secret scan. No tracked `.env` files were observed, although explicit `.env` ignore protections were not confirmed in the reviewed `.gitignore`. The remaining open item is EC2 security group verification, which requires direct AWS access or equivalent evidence such as screenshots or CLI output.
+
+## Recommended Follow-Ups
+1. Obtain AWS access, security group screenshots, or AWS CLI output for EC2 review
+2. Verify inbound and outbound EC2 rules against least-privilege expectations
+3. Add explicit `.env`, `.env.*`, and `*.local` entries to `.gitignore` if environment files may be used
+4. Re-run log review after major deployment or logging changes
+5. Continue using synthetic data for local validation
+6. Keep secrets in environment variables or secret managers only
