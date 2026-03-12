@@ -6,13 +6,16 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use inference::ModelEnvironment;
+use inference::{ModelEnvironment, NerModel};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
 #[allow(clippy::collapsible_if)]
 async fn handle_request(
     mut req: Request<hyper::body::Incoming>,
+    model: Arc<NerModel>,
+    config: Arc<Config>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.uri().path() == "/health" {
         let response = Response::builder()
@@ -23,15 +26,28 @@ async fn handle_request(
         return Ok(response);
     }
 
-    let config = Config::load_from_file("obscura.toml").unwrap_or_default();
     let upstream_url = config.app.upstream_url.clone();
     
-    // OBS-7e: Parse X-Obscura-Skip-Redaction
+    // OBS-7e: Parse X-Obscura-Skip-Redaction (SECURE REFINEMENT)
     let mut skipped_entities: Vec<String> = config.app.disabled_entities.clone();
+    
+    let client_is_authorized = req.headers().get("X-Api-Key")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s == config.app.api_key)
+        .unwrap_or(false);
+
     if let Some(skip_header) = req.headers().get("X-Obscura-Skip-Redaction") {
-        if let Ok(skip_str) = skip_header.to_str() {
-            let overrides: Vec<String> = skip_str.split(',').map(|s| s.trim().to_string()).collect();
-            skipped_entities.extend(overrides);
+        if client_is_authorized {
+            if let Ok(skip_str) = skip_header.to_str() {
+                let overrides: Vec<String> = skip_str.split(',').map(|s| s.trim().to_string()).collect();
+                skipped_entities.extend(overrides);
+            }
+        } else {
+            // PR FEEDBACK: Prevent unauthenticated skip
+            return Ok(Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Full::new(Bytes::from("Unauthorized: Cannot skip redaction without valid API key")))
+                .unwrap());
         }
     }
     
@@ -51,9 +67,20 @@ async fn handle_request(
         }
     }
 
-    // Pass through OBS-7
+    // REDACTION LOGIC (PR FEEDBACK: Implementing actual redaction)
     let body_bytes = http_body_util::BodyExt::collect(req.into_body()).await.unwrap().to_bytes();
-    req_builder = req_builder.body(body_bytes);
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    
+    // We only redact if not explicitly skipped
+    let final_body = if skipped_entities.contains(&"*".to_string()) {
+        body_bytes
+    } else {
+        let bert_spans = model.predict(&body_str).unwrap_or_default();
+        let (redacted_str, _mapping) = inference::redact::redact(&body_str, bert_spans, &skipped_entities).unwrap();
+        Bytes::from(redacted_str)
+    };
+
+    req_builder = req_builder.body(final_body);
 
     match req_builder.send().await {
         Ok(upstream_resp) => {
@@ -80,13 +107,19 @@ async fn handle_request(
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let _config = Config::load_from_file("obscura.toml").unwrap_or_else(|e| {
+    tracing::info!("Loading config...");
+    let config = Arc::new(Config::load_from_file("obscura.toml").unwrap_or_else(|e| {
         tracing::warn!("Failed to load obscura.toml config, using defaults: {}", e);
         Config::default()
-    });
+    }));
 
-    let _model_env = ModelEnvironment::load()
+    tracing::info!("Loading model environment...");
+    let model_env = ModelEnvironment::load()
         .expect("Failed to load model environment, crashing on startup (Fail-Closed policy)");
+    
+    tracing::info!("Initializing NerModel (this may take a moment)...");
+    let model = Arc::new(NerModel::load(&model_env).expect("Failed to load NerModel"));
+    tracing::info!("NerModel loaded successfully.");
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     let listener = TcpListener::bind(addr).await?;
@@ -95,9 +128,13 @@ async fn main() -> anyhow::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
+        let model_clone = Arc::clone(&model);
+        let config_clone = Arc::clone(&config);
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
-                .serve_connection(io, service_fn(handle_request))
+                .serve_connection(io, service_fn(move |req| {
+                    handle_request(req, Arc::clone(&model_clone), Arc::clone(&config_clone))
+                }))
                 .await
             {
                 tracing::error!("Error serving connection: {:?}", err);

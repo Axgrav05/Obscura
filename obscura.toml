@@ -11,6 +11,7 @@ port = 8080
 # Enable extra logging
 debug = true
 upstream_url = "http://localhost:8081"
+api_key = "obscura-dev-key"
 
 [llm]
 # Provider: "openai" | "gemini" | "mock"

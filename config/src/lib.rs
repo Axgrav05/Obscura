@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub upstream_url: String,
     #[serde(default)]
     pub disabled_entities: Vec<String>,
+    #[serde(default)]
+    pub api_key: String,
 }
 
 impl Config {

@@ -4,7 +4,7 @@ use inference::ModelEnvironment;
 #[test]
 fn test_config_loads_defaults() {
     let config = Config::default();
-    assert!(config.disabled_entities.is_empty());
+    assert!(config.app.disabled_entities.is_empty());
 }
 
 #[test]
