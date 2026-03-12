@@ -65,7 +65,8 @@ fn compiled_patterns() -> &'static Vec<(&'static str, fancy_regex::Regex)> {
             .iter()
             .map(|&(label, pattern)| {
                 let re = fancy_regex::Regex::new(pattern).unwrap_or_else(|e| {
-                    panic!("Static regex failed to compile ({}): {}", label, e)
+                    tracing::error!("Static regex failed to compile ({}): {}", label, e);
+                    fancy_regex::Regex::new("").unwrap() // Should never happen with empty string
                 });
                 (label, re)
             })

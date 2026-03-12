@@ -74,7 +74,7 @@ impl NerModel {
                 .iter()
                 .enumerate()
                 .max_by(|(_, a): &(_, &f32), (_, b): &(_, &f32)| a.total_cmp(b))
-                .unwrap();
+                .context("Empty probabilities in token classification")?;
 
             let label = LABEL_MAP.get(best_idx).copied().unwrap_or("O");
             let (char_start, char_end) = offsets.get(i).copied().unwrap_or((0, 0));

@@ -811,6 +811,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokenizers",
+ "tracing",
 ]
 
 [[package]]
@@ -1315,6 +1316,7 @@ dependencies = [
  "hyper-util",
  "inference",
  "reqwest",
+ "subtle",
  "tokio",
  "tracing",
  "tracing-subscriber",
