@@ -4,6 +4,12 @@ use std::fs;
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Config {
     #[serde(default)]
+    pub app: AppConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+pub struct AppConfig {
+    #[serde(default)]
     pub upstream_url: String,
     #[serde(default)]
     pub disabled_entities: Vec<String>,

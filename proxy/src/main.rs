@@ -24,10 +24,10 @@ async fn handle_request(
     }
 
     let config = Config::load_from_file("obscura.toml").unwrap_or_default();
-    let upstream_url = config.upstream_url.clone();
+    let upstream_url = config.app.upstream_url.clone();
     
     // OBS-7e: Parse X-Obscura-Skip-Redaction
-    let mut skipped_entities: Vec<String> = config.disabled_entities.clone();
+    let mut skipped_entities: Vec<String> = config.app.disabled_entities.clone();
     if let Some(skip_header) = req.headers().get("X-Obscura-Skip-Redaction") {
         if let Ok(skip_str) = skip_header.to_str() {
             let overrides: Vec<String> = skip_str.split(',').map(|s| s.trim().to_string()).collect();
@@ -36,8 +36,9 @@ async fn handle_request(
     }
     
     // Build upstream URI
-    let uri_string = format!("{}{}", upstream_url, req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or(""));
-    let uri = uri_string.parse::<hyper::Uri>().unwrap();
+    let path_and_query = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let uri_string = format!("{}{}", upstream_url, path_and_query);
+    let uri = uri_string.parse::<hyper::Uri>().expect("Invalid URI");
     *req.uri_mut() = uri;
 
     let client = reqwest::Client::new();
