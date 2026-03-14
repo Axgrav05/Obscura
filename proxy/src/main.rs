@@ -25,24 +25,57 @@ async fn handle_request(
 
     let config = Config::load_from_file("obscura.toml").unwrap_or_default();
     let upstream_url = config.upstream_url.clone();
-    
+
+    if upstream_url.trim().is_empty() {
+        let mock_body = r#"{
+            "id": "chatcmpl-mock",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Mock LLM response: request successfully passed through Obscura proxy."
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        }"#;
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(mock_body)))
+            .unwrap();
+
+        return Ok(response);
+    }
+
     // OBS-7e: Parse X-Obscura-Skip-Redaction
     let mut skipped_entities: Vec<String> = config.disabled_entities.clone();
     if let Some(skip_header) = req.headers().get("X-Obscura-Skip-Redaction") {
         if let Ok(skip_str) = skip_header.to_str() {
-            let overrides: Vec<String> = skip_str.split(',').map(|s| s.trim().to_string()).collect();
+            let overrides: Vec<String> =
+                skip_str.split(',').map(|s| s.trim().to_string()).collect();
             skipped_entities.extend(overrides);
         }
     }
-    
+
     // Build upstream URI
-    let uri_string = format!("{}{}", upstream_url, req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or(""));
+    let uri_string = format!(
+        "{}{}",
+        upstream_url,
+        req.uri()
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("")
+    );
     let uri = uri_string.parse::<hyper::Uri>().unwrap();
     *req.uri_mut() = uri;
 
     let client = reqwest::Client::new();
     let mut req_builder = client.request(req.method().clone(), uri_string.clone());
-    
+
     // Forward headers
     for (key, value) in req.headers().iter() {
         if key != hyper::header::HOST {
@@ -51,17 +84,20 @@ async fn handle_request(
     }
 
     // Pass through OBS-7
-    let body_bytes = http_body_util::BodyExt::collect(req.into_body()).await.unwrap().to_bytes();
+    let body_bytes = http_body_util::BodyExt::collect(req.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
     req_builder = req_builder.body(body_bytes);
 
     match req_builder.send().await {
         Ok(upstream_resp) => {
             let mut response = Response::builder().status(upstream_resp.status());
-            
+
             for (key, value) in upstream_resp.headers().iter() {
                 response = response.header(key, value);
             }
-            
+
             let bytes = upstream_resp.bytes().await.unwrap();
             Ok(response.body(Full::new(bytes)).unwrap())
         }
