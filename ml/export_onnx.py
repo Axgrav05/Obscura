@@ -369,7 +369,8 @@ def package_bundle(
     Returns:
         Path to the bundle directory.
     """
-    bundle_dir = output_dir / f"bert-ner-v{version}"
+    bundle_prefix = "code-ner" if "codebert" in model_id else "bert-ner"
+    bundle_dir = output_dir / f"{bundle_prefix}-v{version}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     # -- Determine primary model (INT8 preferred) --
@@ -427,7 +428,13 @@ def package_bundle(
         "label_count": len(label_map),
         "aggregation": "simple",
         "confidence_threshold": 0.90,
-        "regex_entity_types": [
+    }
+
+    if "codebert" in model_id:
+        schema["code_entity_types"] = ["CODE_VAR", "CODE_FUNC", "CODE_CLASS", "CODE_SECRET"]
+        schema["code_label_schema"] = ["O", "B-VAR", "I-VAR", "B-FUNC", "I-FUNC", "B-CLASS", "I-CLASS", "B-SECRET", "I-SECRET"]
+    else:
+        schema["regex_entity_types"] = [
             "SSN",
             "PHONE",
             "EMAIL",
@@ -436,9 +443,9 @@ def package_bundle(
             "CREDIT_CARD",
             "IPV4",
             "PASSPORT",
-        ],
-        "bert_entity_types": ["PER", "LOC", "ORG", "MISC"],
-    }
+        ]
+        schema["bert_entity_types"] = ["PER", "LOC", "ORG", "MISC"]
+
     _write_json(bundle_dir / "schema.json", schema)
 
     # -- checksum.sha256 --
@@ -537,6 +544,12 @@ def main() -> None:
         help="Bundle version string (default: 1.0.0)",
     )
     parser.add_argument(
+        "--task",
+        choices=["ner", "code"],
+        default="ner",
+        help="Export task: 'ner' for dslim/bert-base-NER, 'code' for microsoft/codebert-base",
+    )
+    parser.add_argument(
         "--skip-export",
         action="store_true",
         help=(
@@ -545,6 +558,9 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    if args.task == "code":
+        if args.model == "dslim/bert-base-NER":
+            args.model = "microsoft/codebert-base"
     output_dir = Path(args.output)
 
     if args.validate and not (args.quantize or args.skip_export):
