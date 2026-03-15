@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from ml.code_engine import CodeRedactionEngine
+from ml.schemas import DetectedEntity
 
 
 @pytest.fixture
@@ -12,6 +13,15 @@ def engine() -> CodeRedactionEngine:
     eng = CodeRedactionEngine(enable_regex_fallback=True)
     # Never load the actual model in tests
     eng._pipeline = MagicMock()
+    return eng
+
+
+@pytest.fixture
+def engine_regex_mocked() -> CodeRedactionEngine:
+    """Engine with both CodeBERT pipeline and RegexDetector fully mocked."""
+    eng = CodeRedactionEngine(enable_regex_fallback=True)
+    eng._pipeline = MagicMock()
+    eng.regex_detector.detect = MagicMock(return_value=[])
     return eng
 
 
@@ -154,29 +164,60 @@ class TestInternalTopologies:
 
 
 class TestDualPassFallback:
-    def test_credit_card_in_code_caught_by_regex(self, engine: CodeRedactionEngine):
-        engine._pipeline.return_value = [
+    def test_credit_card_in_code_caught_by_regex(
+        self, engine_regex_mocked: CodeRedactionEngine
+    ):
+        code = (
+            "def process_payment():\n"
+            "    card = '4532015112830366'\n"
+            "    return charge(card)\n"
+        )
+        engine_regex_mocked._pipeline.return_value = [
             {
                 "entity_group": "FUNC",
                 "score": 0.96,
                 "word": "process_payment",
                 "start": 4,
                 "end": 19,
-            }
+            },
         ]
-        code = "def process_payment():\n    cc = '4111-2222-3333-4444'\n"
-        # RegexDetector will catch the CC
-        result = engine.redact(code)
+        # CC "4532015112830366" starts at offset 35 in the code string above
+        engine_regex_mocked.regex_detector.detect.return_value = [
+            DetectedEntity(
+                text="4532015112830366",
+                entity_type="CREDIT_CARD",
+                start=35,
+                end=51,
+                score=0.99,
+                token="",
+                source="regex",
+            )
+        ]
+        result = engine_regex_mocked.redact(code)
 
         entity_types = {e.entity_type for e in result.entities}
         assert "CODE_FUNC" in entity_types
         assert "CREDIT_CARD" in entity_types
-        assert "4111-2222-3333-4444" not in result.masked_text
+        assert "4532015112830366" not in result.masked_text
 
-    def test_ssn_in_code_caught_by_regex(self, engine: CodeRedactionEngine):
-        engine._pipeline.return_value = []
-        code = "user_ssn = '123-45-6789'"
-        result = engine.redact(code)
+    def test_ssn_in_code_caught_by_regex(
+        self, engine_regex_mocked: CodeRedactionEngine
+    ):
+        code = "test_ssn = '123-45-6789'  # synthetic test value"
+        engine_regex_mocked._pipeline.return_value = []
+        # SSN "123-45-6789" starts at offset 12
+        engine_regex_mocked.regex_detector.detect.return_value = [
+            DetectedEntity(
+                text="123-45-6789",
+                entity_type="SSN",
+                start=12,
+                end=23,
+                score=0.99,
+                token="",
+                source="regex",
+            )
+        ]
+        result = engine_regex_mocked.redact(code)
 
         entity_types = {e.entity_type for e in result.entities}
         assert "SSN" in entity_types
