@@ -36,6 +36,19 @@ import numpy as np
 import torch
 from transformers import AutoModelForTokenClassification, AutoTokenizer
 
+# Code NER label schema — must stay in sync with CODE_LABELS in ml/code_engine.py
+_CODE_LABELS: list[str] = [
+    "O",
+    "B-VAR",
+    "I-VAR",
+    "B-FUNC",
+    "I-FUNC",
+    "B-CLASS",
+    "I-CLASS",
+    "B-SECRET",
+    "I-SECRET",
+]
+
 # ---------------------------------------------------------------------------
 # OBS-13a: ONNX export
 # ---------------------------------------------------------------------------
@@ -359,6 +372,7 @@ def package_bundle(
     onnx_int8_path: Path | None = None,
     validation_results: dict | None = None,
     version: str = "1.0.0",
+    task: str = "ner",
 ) -> Path:
     """Package the ONNX artifact bundle for the Rust proxy backend.
 
@@ -369,7 +383,8 @@ def package_bundle(
     Returns:
         Path to the bundle directory.
     """
-    bundle_dir = output_dir / f"bert-ner-v{version}"
+    bundle_prefix = "code-ner" if task == "code" else "bert-ner"
+    bundle_dir = output_dir / f"{bundle_prefix}-v{version}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     # -- Determine primary model (INT8 preferred) --
@@ -427,7 +442,20 @@ def package_bundle(
         "label_count": len(label_map),
         "aggregation": "simple",
         "confidence_threshold": 0.90,
-        "regex_entity_types": [
+    }
+
+    if task == "code":
+        schema["code_entity_types"] = [
+            "CODE_VAR",
+            "CODE_FUNC",
+            "CODE_CLASS",
+            "CODE_SECRET",
+        ]
+        schema["code_label_schema"] = list(_CODE_LABELS)
+        schema.pop("regex_entity_types", None)
+        schema.pop("bert_entity_types", None)
+    else:
+        schema["regex_entity_types"] = [
             "SSN",
             "PHONE",
             "EMAIL",
@@ -436,9 +464,9 @@ def package_bundle(
             "CREDIT_CARD",
             "IPV4",
             "PASSPORT",
-        ],
-        "bert_entity_types": ["PER", "LOC", "ORG", "MISC"],
-    }
+        ]
+        schema["bert_entity_types"] = ["PER", "LOC", "ORG", "MISC"]
+
     _write_json(bundle_dir / "schema.json", schema)
 
     # -- checksum.sha256 --
@@ -537,6 +565,15 @@ def main() -> None:
         help="Bundle version string (default: 1.0.0)",
     )
     parser.add_argument(
+        "--task",
+        choices=["ner", "code"],
+        default="ner",
+        help=(
+            "Export task: 'ner' for dslim/bert-base-NER,"
+            " 'code' for microsoft/codebert-base"
+        ),
+    )
+    parser.add_argument(
         "--skip-export",
         action="store_true",
         help=(
@@ -545,6 +582,9 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    effective_model: str = args.model
+    if args.task == "code" and args.model == "dslim/bert-base-NER":
+        effective_model = "microsoft/codebert-base"
     output_dir = Path(args.output)
 
     if args.validate and not (args.quantize or args.skip_export):
@@ -560,7 +600,7 @@ def main() -> None:
             )
         print(f"Skipping export — using existing {onnx_fp32_path}")
     else:
-        onnx_fp32_path = export_model(args.model, output_dir)
+        onnx_fp32_path = export_model(effective_model, output_dir)
 
     # Step 2: Quantize (optional, skip if --skip-export).
     onnx_int8_path: Path | None = None
@@ -576,7 +616,7 @@ def main() -> None:
     validation_results: dict | None = None
     if args.validate and onnx_int8_path:
         validation_results = validate_quantized_model(
-            args.model, onnx_fp32_path, onnx_int8_path
+            effective_model, onnx_fp32_path, onnx_int8_path
         )
         # Save validation results alongside the model.
         results_path = output_dir / "validation_results.json"
@@ -586,12 +626,13 @@ def main() -> None:
     # Step 4: Package bundle (optional).
     if args.bundle:
         package_bundle(
-            model_id=args.model,
+            model_id=effective_model,
             output_dir=output_dir,
             onnx_fp32_path=onnx_fp32_path,
             onnx_int8_path=onnx_int8_path,
             validation_results=validation_results,
             version=args.version,
+            task=args.task,
         )
 
 
